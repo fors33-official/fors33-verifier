@@ -8,6 +8,8 @@ RUN chmod +x /entrypoint.sh
 
 RUN pip install --no-cache-dir flask
 COPY server_url_only.py /app/server_url_only.py
+COPY serve /usr/local/bin/serve
+RUN chmod +x /usr/local/bin/serve
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["--help"]

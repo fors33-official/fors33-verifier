@@ -1,0 +1,3 @@
+#!/bin/sh
+# Executable for platforms that run "serve" as the main process (e.g. DigitalOcean App Platform).
+exec python /app/server_url_only.py "$@"
