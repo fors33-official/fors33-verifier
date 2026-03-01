@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fors33-verifier"
+version = "0.1.0"
+description = "Verify attested data segments. Standalone SHA-256 verification for data provenance."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{name = "FORS33"}]
+keywords = ["verification", "sha256", "data-provenance", "attestation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.scripts]
+fors33-verifier = "verify_dpk:main"
+
+[tool.setuptools.packages.find]
+include = []
+
+[tool.setuptools]
+py-modules = ["verify_dpk"]
