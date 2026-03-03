@@ -1,6 +1,6 @@
 # fors33-verifier
 
-[![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/ci.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/build-push-fors33-verifier-docker.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
