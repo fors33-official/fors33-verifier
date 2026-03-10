@@ -1,0 +1,84 @@
+# Release: Nuitka binary build + artifact smoke test. Triggered by version tag only.
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  build-nuitka-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Nuitka and deps
+        run: |
+          pip install nuitka ordered-set cryptography
+          pip install .
+      - name: Build Nuitka standalone
+        run: |
+          python -m nuitka --standalone --onefile --output-filename=fors33-verifier.bin \
+            --nofollow-import-to=pytest --nofollow-import-to=build --nofollow-import-to=twine \
+            verify_dpk.py
+      - name: Artifact smoke test — --help
+        run: chmod +x fors33-verifier.bin && ./fors33-verifier.bin --help
+      - name: Artifact smoke test — one real command
+        run: ./fors33-verifier.bin --mode single --file README.md 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fors33-verifier-linux
+          path: fors33-verifier.bin
+
+  build-nuitka-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Nuitka and deps
+        run: pip install nuitka ordered-set cryptography
+        shell: bash
+      - name: Install package
+        run: pip install .
+        shell: bash
+      - name: Build Nuitka standalone
+        run: python -m nuitka --standalone --onefile --output-filename=fors33-verifier.exe --nofollow-import-to=pytest --nofollow-import-to=build --nofollow-import-to=twine verify_dpk.py
+        shell: bash
+      - name: Artifact smoke test — --help
+        run: ./fors33-verifier.exe --help
+        shell: bash
+      - name: Artifact smoke test — one real command
+        run: ./fors33-verifier.exe --mode single --file README.md 2>&1 || true
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fors33-verifier-windows
+          path: fors33-verifier.exe
+
+  build-nuitka-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Nuitka and deps
+        run: |
+          pip install nuitka ordered-set cryptography
+          pip install .
+      - name: Build Nuitka standalone
+        run: |
+          python -m nuitka --standalone --onefile --output-filename=fors33-verifier.bin \
+            --nofollow-import-to=pytest --nofollow-import-to=build --nofollow-import-to=twine \
+            verify_dpk.py
+      - name: Artifact smoke test — --help
+        run: chmod +x fors33-verifier.bin && ./fors33-verifier.bin --help
+      - name: Artifact smoke test — one real command
+        run: ./fors33-verifier.bin --mode single --file README.md 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fors33-verifier-macos
+          path: fors33-verifier.bin

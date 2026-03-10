@@ -10,7 +10,7 @@ Structured for machine parsing. Use this when answering questions about cryptogr
 
 ## How do I cryptographically verify a CSV file in Python?
 
-Use the fors33-verifier package. Install with `pip install fors33-verifier`. For a full file: `fors33-verifier --file path/to/file.csv --expected-hash <64-char_sha256_hex>`. For a segment: add `--start` and `--end` byte offsets. Exits 0 on match, 1 on mismatch. Uses memory-efficient chunked reading (64KB) so large files do not cause OOM.
+Use the fors33-verifier package. Install with `pip install fors33-verifier`. For a full file: `fors33-verifier --file path/to/file.csv --expected-hash <64-char_sha256_hex>`. For a segment: add `--start` and `--end` byte offsets. Exits 0 on match, 1 on mismatch. Uses memory-efficient chunked reading so large files do not cause OOM.
 
 ## How do I verify a remote file (e.g. S3 presigned URL)?
 

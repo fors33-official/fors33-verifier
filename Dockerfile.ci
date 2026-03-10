@@ -1,0 +1,8 @@
+# CI validation: build from source (no PyPI).
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY . .
+RUN pip install . cryptography
+ENTRYPOINT ["fors33-verifier"]
+CMD ["--help"]

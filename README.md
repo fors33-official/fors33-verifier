@@ -5,7 +5,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
-Standalone verification for attested data segments. For machine-readable context (LLMs, crawlers), see [LLM_CONTEXT.md](LLM_CONTEXT.md). Confirm that a data segment matches a published SHA-256 hash.
+Standalone verification for attested data segments and general-purpose file integrity baselines. For machine-readable context (LLMs, crawlers), see [LLM_CONTEXT.md](LLM_CONTEXT.md). Confirm that a data segment or directory tree matches published hashes.
 
 ## Install
 
@@ -40,11 +40,23 @@ fors33-verifier --file /path/to/data.csv --start 0 --end 4096 --expected-hash <s
 fors33-verifier --file /path/to/data.csv --record /path/to/attestation_record.json
 ```
 
-The attestation record JSON must contain `byte_start`, `byte_end`, and `hash`. Uses memory-efficient chunked reading (64KB) so large files do not cause OOM.
+The attestation record JSON must contain `byte_start`, `byte_end`, and `hash`. Uses memory-efficient chunked reading so large files do not cause OOM.
+
+**Directory verification (manifest mode):**
+```bash
+fors33-verifier --mode manifest --file ./baseline.sha256 --target-dir ./root --format json
+```
+Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emits a structured drift report with `modified`, `created`, `deleted`, `mutated_during_verification`, and `skipped`.
+
+**Sidecar verification:**
+```bash
+fors33-verifier --mode sidecars --file ./root --format json
+```
+Walk the tree and verify `.f33`, `.sha256`, `.sha512`, and `.md5` sidecars in place.
 
 ## Output
 
-System-log format with timestamp, target, SHA-256, and status. Exits 0 on match, 1 on mismatch.
+System-log format with timestamp, target, SHA-256, and status. Exits 0 on match, 1 on mismatch. Manifest/sidecars modes support `--format json` with `--warn-only` to report drift without failing.
 
 ## GitHub Action (CI/CD)
 
@@ -83,7 +95,7 @@ For a hosted API that verifies **presigned URLs only** (no file uploads), run th
 
 ## Requirements
 
-Python 3.9+. Uses only standard library (hashlib, json, argparse, urllib.request).
+Python 3.9–3.12. `cryptography` (required). Optional `blake3` for faster hashing. Platforms: Linux, macOS, Windows.
 
 ## License
 

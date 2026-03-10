@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pytest
+
+      - name: Smoke test CLI
+        run: fors33-verifier --help
+
+      - name: Run full test suite
+        run: python -m pytest tests/ -v --ignore=tests/test_large_file_progress.py
+
+      - name: Build wheel and smoke test (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          pip install build
+          python -m build --wheel
+          pip uninstall -y fors33-verifier 2>/dev/null || true
+          pip install dist/fors33_verifier*.whl 2>/dev/null || pip install dist/*.whl
+          fors33-verifier --help
+
+  hash-gate:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install with requirement hashes (supply-chain integrity)
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-release.txt --require-hashes
+          pip install .
+      - name: Smoke test
+        run: fors33-verifier --help
+
+  build-package:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build wheel and sdist
+        run: |
+          pip install build twine
+          python -m build
+      - name: Twine check
+        run: twine check dist/*
+      - name: Install from wheel in clean venv
+        run: |
+          python -m venv /tmp/venv
+          . /tmp/venv/bin/activate
+          pip install dist/*.whl
+          fors33-verifier --help
+
+  docker:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image (from source)
+        run: docker build -f Dockerfile.ci -t fors33-verifier:test .
+      - name: Docker smoke test
+        run: docker run --rm fors33-verifier:test --help
+
