@@ -1,0 +1,29 @@
+# VCS / editor
+.git
+.github
+.cursor
+.vscode
+
+# Python caches and local envs
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local docs and transfer artifacts not required for image runtime
+docs/
+verifier-0.4.0-update.md
+
+# Local Docker/scan artifacts
+*.tar
+*.log

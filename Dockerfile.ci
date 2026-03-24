@@ -1,11 +1,17 @@
 # CI validation: build from source with hash-locked dependencies.
-FROM python:3.11-slim
+FROM python:3.13-alpine
+
+# Pull latest security updates for scanner parity with production base.
+RUN apk update \
+    && apk upgrade \
+    && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 COPY . .
 
 # Enforce supply-chain hardening: install only hashed, approved deps.
 COPY requirements-release.txt .
+RUN python -m pip install --upgrade pip==26.0 wheel==0.46.2 setuptools==78.1.1
 RUN pip install -r requirements-release.txt --require-hashes
 
 # Install the package itself without pulling additional dependencies.

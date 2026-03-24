@@ -1,20 +1,49 @@
-# fors33-verifier: CLI-only image for CI/CD and URL-based verification.
-# No file uploads; zero-trust. Use for GitHub Action and App Platform (--url flow only).
-FROM python:3.11-slim-bookworm
+# fors33-verifier hardened runtime image.
+# Multi-stage build keeps final image minimal and strips build tooling.
 
-# Install verifier + optional Flask server, then remove build tooling
-RUN pip install --no-cache-dir fors33-verifier \
-    && pip install --no-cache-dir flask \
-    && pip uninstall -y pip setuptools wheel
+FROM python:3.13-alpine AS builder
 
+ENV VENV_PATH=/opt/venv
+ENV PATH="${VENV_PATH}/bin:${PATH}"
+
+RUN apk update \
+    && apk upgrade \
+    && rm -rf /var/cache/apk/*
+
+RUN python -m venv "${VENV_PATH}"
+WORKDIR /app
+
+COPY requirements-release.txt .
+
+# Pin and upgrade build tools, then install hash-locked runtime deps.
+RUN python -m pip install --upgrade pip==26.0 wheel==0.46.2 setuptools==78.1.1 \
+    && pip install --require-hashes -r requirements-release.txt
+
+COPY . .
+
+# Install this package from source using locked dependencies.
+RUN pip install --no-deps . \
+    && pip install --no-cache-dir flask==3.1.3
+
+FROM python:3.13-alpine
+
+ENV VENV_PATH=/opt/venv
+ENV PATH="${VENV_PATH}/bin:${PATH}"
+WORKDIR /app
+
+# Pull latest Alpine security updates at build time.
+RUN apk update \
+    && apk upgrade \
+    && rm -rf /var/cache/apk/*
+
+COPY --from=builder /opt/venv /opt/venv
 COPY entrypoint.sh /entrypoint.sh
 COPY server_url_only.py /app/server_url_only.py
-# Executable "serve" for platforms that run it as the main process (e.g. DigitalOcean App Platform).
 COPY serve /usr/local/bin/serve
 
-RUN chmod +x /entrypoint.sh \
+RUN /opt/venv/bin/pip uninstall -y pip setuptools wheel \
+    && chmod +x /entrypoint.sh \
     && chmod +x /usr/local/bin/serve
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Default: CLI. For App Platform URL-only API, override CMD to: ["python", "/app/server_url_only.py"]
 CMD ["--help"]
