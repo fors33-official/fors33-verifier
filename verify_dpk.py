@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -24,11 +25,23 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
 try:  # Support both package and flat-module imports
-    from .hash_core import hash_file, hash_stream, infer_algo_from_digest, path_for_kernel  # type: ignore[import]
-    from .manifest_core import ManifestEntry, load_manifest  # type: ignore[import]
+    from .hash_core import (  # type: ignore[import]
+        default_dpk_worker_count,
+        hash_file,
+        hash_stream,
+        infer_algo_from_digest,
+        path_for_kernel,
+    )
+    from .manifest_core import ManifestEntry, load_manifest, verify_manifest_hash_chain  # type: ignore[import]
 except ImportError:  # pragma: no cover - flat layout
-    from hash_core import hash_file, hash_stream, infer_algo_from_digest, path_for_kernel  # type: ignore[import]
-    from manifest_core import ManifestEntry, load_manifest  # type: ignore[import]
+    from hash_core import (  # type: ignore[import]
+        default_dpk_worker_count,
+        hash_file,
+        hash_stream,
+        infer_algo_from_digest,
+        path_for_kernel,
+    )
+    from manifest_core import ManifestEntry, load_manifest, verify_manifest_hash_chain  # type: ignore[import]
 
 try:
     import urllib.request
@@ -62,16 +75,130 @@ def _print_compliance_notice() -> None:
         print(line, file=sys.stderr)
 
 
-def _default_worker_count() -> int:
-    if os.environ.get("FORS33_EXTENSION_MODE", "").strip() == "1":
-        return 4
-    return min(32, (os.cpu_count() or 1) + 4)
+def resolve_manifest_worker_count(cli_workers: int | None) -> int:
+    """
+    Worker pool size: positive --workers wins; else positive FORS33_WORKERS;
+    else default_dpk_worker_count() (FORS33_DPK_MAX_WORKERS applied inside that).
+    Non-positive CLI or env values mean auto.
+    """
+    if cli_workers is not None and cli_workers > 0:
+        return min(64, int(cli_workers))
+    env_raw = os.environ.get("FORS33_WORKERS", "").strip()
+    if env_raw:
+        try:
+            ev = int(env_raw, 10)
+        except ValueError:
+            raise ValueError("FORS33_WORKERS must be an integer") from None
+        if ev > 0:
+            return min(64, ev)
+    return default_dpk_worker_count()
 
 
-def _effective_worker_count(max_workers: int | None) -> int:
-    if max_workers is None or max_workers <= 0:
-        return _default_worker_count()
-    return min(64, int(max_workers))
+_DISALLOWED_BIDI = frozenset({"RLE", "LRE", "RLO", "LRO", "RLI", "LRI", "FSI", "PDF"})
+
+
+def seal_utf8_normalize_and_validate(label: str, value: str, max_len: int = 512) -> str:
+    """NFC-normalize and reject C0/C1 controls, unassigned code points, Cf format chars, and bidi embedding."""
+    s = unicodedata.normalize("NFC", str(value))
+    if len(s) > max_len:
+        raise ValueError(f"{label} exceeds max length ({max_len})")
+    for ch in s:
+        o = ord(ch)
+        if o < 0x20 or (0x7F <= o < 0xA0):
+            raise ValueError(f"{label} contains disallowed control characters")
+        cat = unicodedata.category(ch)
+        if cat == "Cn":
+            raise ValueError(f"{label} contains unassigned code points")
+        if cat == "Cf":
+            raise ValueError(f"{label} contains disallowed format characters")
+        b = unicodedata.bidirectional(ch)
+        if b in _DISALLOWED_BIDI:
+            raise ValueError(f"{label} contains disallowed bidirectional control characters")
+    return s
+
+
+def sanitize_seal_metadata_value(value: object, max_len: int = 256) -> str | None:
+    """Coerce seal metadata to a safe string; None when empty after sanitization."""
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return None
+    out: list[str] = []
+    for ch in s:
+        if ch in '"\\':
+            continue
+        if ord(ch) < 32:
+            continue
+        out.append(ch)
+        if len(out) >= max_len:
+            break
+    cleaned = "".join(out).strip()
+    return cleaned or None
+
+
+def build_canonical_payload(
+    target_name: str,
+    byte_start: int,
+    byte_end: int,
+    timestamp: str,
+    file_hash: str,
+    hash_algo: str = "sha256",
+    *,
+    payload_version: int = 2,
+    operator_id: str | None = None,
+    operator_key_id: str | None = None,
+    authorized_operator: str | None = None,
+    organization: str | None = None,
+) -> bytes:
+    """Deterministic UTF-8 payload bytes for Ed25519 (V1 four lines or V2 with optional custody lines)."""
+    if os.path.sep in target_name:
+        raise ValueError("target_name must be a basename, not a path")
+    if byte_start < 0 or byte_end <= byte_start:
+        raise ValueError("byte_start/byte_end must define a non-empty, non-negative range")
+    algo_l = (hash_algo or "sha256").lower()
+    if algo_l == "sha512":
+        if len(file_hash) != 128 or not all(c in "0123456789abcdef" for c in file_hash):
+            raise ValueError("file_hash must be 128-char lowercase hex for sha512")
+        line = f"SHA512:{file_hash}"
+    else:
+        if len(file_hash) != 64 or not all(c in "0123456789abcdef" for c in file_hash):
+            raise ValueError("file_hash must be 64-char lowercase hex for sha256")
+        line = f"SHA256:{file_hash}"
+
+    if payload_version == 1:
+        payload_str = (
+            f"TARGET:{target_name}\n"
+            f"RANGE:{byte_start}:{byte_end}\n"
+            f"TIMESTAMP:{timestamp}\n"
+            f"{line}"
+        )
+        return payload_str.encode("utf-8")
+
+    tgt = seal_utf8_normalize_and_validate("TARGET", target_name, max_len=4096)
+    ts = seal_utf8_normalize_and_validate("TIMESTAMP", timestamp, max_len=64)
+
+    if payload_version != 2:
+        raise ValueError(f"unsupported payload_version: {payload_version}")
+
+    lines = [
+        "PAYLOAD_VERSION:2",
+        f"TARGET:{tgt}",
+        f"RANGE:{byte_start}:{byte_end}",
+        f"TIMESTAMP:{ts}",
+        line,
+    ]
+    oid = sanitize_seal_metadata_value(operator_id)
+    okid = sanitize_seal_metadata_value(operator_key_id)
+    ao = sanitize_seal_metadata_value(authorized_operator)
+    org = sanitize_seal_metadata_value(organization)
+    if oid:
+        lines.append(f"OPERATOR_ID:{seal_utf8_normalize_and_validate('OPERATOR_ID', oid)}")
+    if okid:
+        lines.append(f"OPERATOR_KEY_ID:{seal_utf8_normalize_and_validate('OPERATOR_KEY_ID', okid, max_len=256)}")
+    if ao:
+        lines.append(f"AUTHORIZED_OPERATOR:{seal_utf8_normalize_and_validate('AUTHORIZED_OPERATOR', ao)}")
+    if org:
+        lines.append(f"ORGANIZATION:{seal_utf8_normalize_and_validate('ORGANIZATION', org)}")
+    return "\n".join(lines).encode("utf-8")
 
 
 @dataclass
@@ -130,7 +257,10 @@ def _load_f33ignore_patterns(root: str) -> List[str]:
         pass
     return patterns
 
-# --- .f33 sidecar (JSON statement format) ---
+# --- .f33 sidecar (in-toto Statement v0.1 or v1) ---
+
+_IN_TOTO_STATEMENT_V0_1 = "https://in-toto.io/Statement/v0.1"
+_IN_TOTO_STATEMENT_V1 = "https://in-toto.io/Statement/v1"
 
 
 class ManifestCompromisedError(RuntimeError):
@@ -143,101 +273,311 @@ class ManifestCompromisedError(RuntimeError):
         self.sidecar_digest = sidecar_digest
 
 
-def _parse_f33(sidecar_path: str) -> dict:
-    """
-    Parse JSON .f33 sidecar with deterministic non-DSSE payload fields.
+def _f33_validate_subject_digest(sub: dict, index: int) -> None:
+    """Ensure subject[index] has a digest object with valid sha256 or sha512 hex."""
+    digest = sub.get("digest")
+    if not isinstance(digest, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[{index}].digest missing/invalid")
+    sha256_hex = digest.get("sha256")
+    sha512_hex = digest.get("sha512")
+    if isinstance(sha256_hex, str) and sha256_hex.strip():
+        h = sha256_hex.strip().lower()
+        if len(h) != 64 or any(c not in "0123456789abcdef" for c in h):
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[{index}].digest.sha256 must be 64 hex chars")
+    elif isinstance(sha512_hex, str) and sha512_hex.strip():
+        h = sha512_hex.strip().lower()
+        if len(h) != 128 or any(c not in "0123456789abcdef" for c in h):
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[{index}].digest.sha512 must be 128 hex chars")
+    else:
+        raise ValueError(
+            f"{_ERR_INVALID_SEAL_FORMAT} subject[{index}].digest.sha256 or sha512 missing/invalid"
+        )
 
-    Required semantic fields:
-      - subject.name
-      - subject.digest.sha256
-      - predicate.range.start/end
-      - predicate.timestamp
-      - predicate.signature.public_key_hex / signature_hex
-    Optional:
-      - predicate.tsa.{payload,public_key_hex,signature_hex}
-    """
+
+def _parse_f33(sidecar_path: str) -> dict:
+    """Parse `.f33` as in-toto Statement JSON (v0.1 or v1). Raises ValueError on contract mismatch."""
     try:
         with open(path_for_kernel(sidecar_path), encoding="utf-8") as f:
-            doc = json.load(f)
-    except Exception as e:
+            statement = json.load(f)
+    except json.JSONDecodeError as e:
         raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} non-json sidecar: {e}") from e
+    except OSError as e:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} cannot read sidecar: {e}") from e
 
-    if not isinstance(doc, dict):
+    if not isinstance(statement, dict):
         raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} root must be JSON object")
 
-    subject = doc.get("subject")
+    raw_type = statement.get("_type")
+    if raw_type is None or (isinstance(raw_type, str) and not str(raw_type).strip()):
+        stmt_type = _IN_TOTO_STATEMENT_V0_1
+    else:
+        stmt_type = str(raw_type).strip()
+    if stmt_type not in (_IN_TOTO_STATEMENT_V0_1, _IN_TOTO_STATEMENT_V1):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} unsupported _type {stmt_type!r}")
+
+    subject = statement.get("subject")
     if not isinstance(subject, list) or not subject:
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing subject array")
-    subj0 = subject[0]
-    if not isinstance(subj0, dict):
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} invalid subject entry")
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing subject[]")
 
-    target = subj0.get("name")
-    digest_obj = subj0.get("digest")
-    if not isinstance(digest_obj, dict):
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing subject.digest")
-    sha256 = str(digest_obj.get("sha256", "")).lower()
+    for idx, sub in enumerate(subject):
+        if not isinstance(sub, dict):
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[{idx}] must be an object")
+        _f33_validate_subject_digest(sub, idx)
 
-    predicate = doc.get("predicate")
+    s0 = subject[0]
+    target_name = s0.get("name")
+    digest = s0.get("digest")
+    if not isinstance(target_name, str) or not target_name:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[0].name missing/invalid")
+    if not isinstance(digest, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[0].digest missing/invalid")
+    sha256_hex = digest.get("sha256")
+    sha512_hex = digest.get("sha512")
+    file_hash_raw: str
+    digest_algo: str
+    if isinstance(sha256_hex, str) and sha256_hex.strip():
+        file_hash_raw = sha256_hex
+        digest_algo = "sha256"
+    elif isinstance(sha512_hex, str) and sha512_hex.strip():
+        file_hash_raw = sha512_hex
+        digest_algo = "sha512"
+    else:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[0].digest.sha256 or sha512 missing/invalid")
+
+    predicate = statement.get("predicate")
     if not isinstance(predicate, dict):
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate")
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate object")
 
+    byte_start = (
+        predicate.get("byte_start", None)
+        if "byte_start" in predicate
+        else predicate.get("range_start", None)
+    )
+    byte_end = (
+        predicate.get("byte_end", None) if "byte_end" in predicate else predicate.get("range_end", None)
+    )
     range_obj = predicate.get("range")
-    if not isinstance(range_obj, dict):
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate.range")
-    try:
-        range_start = int(range_obj.get("start"))
-        range_end = int(range_obj.get("end"))
-    except Exception as e:
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} invalid range bounds") from e
+    if isinstance(range_obj, dict):
+        if byte_start is None:
+            byte_start = range_obj.get("start")
+        if byte_end is None:
+            byte_end = range_obj.get("end")
+    timestamp = predicate.get("timestamp", None)
+    public_key_hex = predicate.get("public_key_hex", None) or predicate.get("pubkey_ed25519", None)
+    signature_hex = predicate.get("signature_hex", None) or predicate.get("signature_ed25519", None)
+    sig_nested = predicate.get("signature")
+    if isinstance(sig_nested, dict):
+        if not public_key_hex:
+            public_key_hex = sig_nested.get("public_key_hex") or sig_nested.get("pubkey_ed25519")
+        if not signature_hex:
+            signature_hex = sig_nested.get("signature_hex") or sig_nested.get("signature_ed25519")
+    operator_key_id = predicate.get("operator_key_id", None)
 
-    timestamp = predicate.get("timestamp")
-    sig_obj = predicate.get("signature")
-    if not isinstance(sig_obj, dict):
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate.signature")
-    public_key_hex = str(sig_obj.get("public_key_hex", "")).lower()
-    signature_hex = str(sig_obj.get("signature_hex", "")).lower()
+    def _pred_opt_str(pred: dict, key: str) -> str | None:
+        v = pred.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
 
-    tsa_obj = predicate.get("tsa")
-    rfc3161_b64: str | None = None
-    if isinstance(tsa_obj, dict):
-        raw_rfc = tsa_obj.get("rfc3161_token_b64")
-        if isinstance(raw_rfc, str) and raw_rfc.strip():
-            rfc3161_b64 = raw_rfc.strip()
+    cpv_raw = predicate.get("canonical_payload_version")
+    if cpv_raw is None or (isinstance(cpv_raw, str) and not str(cpv_raw).strip()):
+        canonical_payload_version_explicit = False
+        canonical_payload_version: int | None = None
+    else:
+        canonical_payload_version_explicit = True
+        try:
+            canonical_payload_version = int(cpv_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} canonical_payload_version must be an integer") from e
+        if canonical_payload_version not in (1, 2):
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} unsupported canonical_payload_version")
 
-    parsed = {
-        "target": target,
-        "range_start": range_start,
-        "range_end": range_end,
-        "timestamp": timestamp,
-        "sha256": sha256,
-        "public_key_hex": public_key_hex,
-        "signature_hex": signature_hex,
-        "tsa": tsa_obj,
-        "rfc3161_token_b64": rfc3161_b64,
-    }
-    for r in ("target", "range_start", "range_end", "timestamp", "sha256", "public_key_hex", "signature_hex"):
-        if parsed.get(r) in (None, ""):
-            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing required field: {r}")
-    if len(parsed["sha256"]) != 64:
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject.digest.sha256 must be 64 hex chars")
-    if len(parsed["public_key_hex"]) != 64:
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} signature.public_key_hex must be 64 hex chars")
-    if len(parsed["signature_hex"]) != 128:
-        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} signature.signature_hex must be 128 hex chars")
-    return parsed
+    if byte_start is None or byte_end is None or timestamp is None or public_key_hex is None or signature_hex is None:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing required predicate fields")
 
+    if not isinstance(byte_start, int) or not isinstance(byte_end, int):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.byte_start/byte_end must be integers")
+    if byte_end <= byte_start:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate byte range must be non-empty (end > start)")
+    if not isinstance(timestamp, str) or not timestamp:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.timestamp missing/invalid")
+    if not isinstance(public_key_hex, str) or not public_key_hex:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.public_key_hex missing/invalid")
+    if not isinstance(signature_hex, str) or not signature_hex:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.signature_hex missing/invalid")
 
-def _canonical_payload_f33(target_name: str, range_start: int, range_end: int, timestamp: str, file_hash: str) -> bytes:
-    """Deterministic non-DSSE canonical JSON payload for Ed25519 verification."""
-    payload_obj = {
+    file_hash_l = file_hash_raw.lower()
+    public_key_hex_l = public_key_hex.lower()
+    signature_hex_l = signature_hex.lower()
+
+    tsa_public_key_hex = (
+        predicate.get("tsa_public_key_hex")
+        or predicate.get("tsa_pubkey_ed25519")
+        or predicate.get("public_key_hex_tsa")
+        or predicate.get("pubkey_ed25519_tsa")
+    )
+    tsa_signature_hex = (
+        predicate.get("tsa_signature_hex")
+        or predicate.get("tsa_signature_ed25519")
+        or predicate.get("signature_hex_tsa")
+        or predicate.get("signature_ed25519_tsa")
+    )
+    tsa_public_key_hex_l = tsa_public_key_hex.lower() if isinstance(tsa_public_key_hex, str) else None
+    tsa_signature_hex_l = tsa_signature_hex.lower() if isinstance(tsa_signature_hex, str) else None
+
+    rfc3161_raw = predicate.get("rfc3161_token_b64")
+    rfc3161_b64 = rfc3161_raw.strip() if isinstance(rfc3161_raw, str) and rfc3161_raw.strip() else None
+    if not rfc3161_b64:
+        tsa_obj = predicate.get("tsa")
+        if isinstance(tsa_obj, dict):
+            nested = tsa_obj.get("rfc3161_token_b64")
+            if isinstance(nested, str) and nested.strip():
+                rfc3161_b64 = nested.strip()
+
+    if digest_algo == "sha512":
+        if len(file_hash_l) != 128 or any(c not in "0123456789abcdef" for c in file_hash_l):
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[0].digest.sha512 must be 128 hex chars")
+    elif len(file_hash_l) != 64 or any(c not in "0123456789abcdef" for c in file_hash_l):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject[0].digest.sha256 must be 64 hex chars")
+    if len(public_key_hex_l) != 64 or any(c not in "0123456789abcdef" for c in public_key_hex_l):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.public_key_hex must be 64 hex chars")
+    if len(signature_hex_l) != 128 or any(c not in "0123456789abcdef" for c in signature_hex_l):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.signature_hex must be 128 hex chars")
+
+    return {
         "target": target_name,
-        "range_start": int(range_start),
-        "range_end": int(range_end),
+        "range_start": byte_start,
+        "range_end": byte_end,
         "timestamp": timestamp,
-        "sha256": file_hash.lower(),
+        "file_digest": file_hash_l,
+        "digest_algo": digest_algo,
+        "public_key_hex": public_key_hex_l,
+        "signature_hex": signature_hex_l,
+        "operator_key_id": str(operator_key_id) if operator_key_id is not None else "",
+        "canonical_payload_version": canonical_payload_version,
+        "canonical_payload_version_explicit": canonical_payload_version_explicit,
+        "operator_id": _pred_opt_str(predicate, "operator_id"),
+        "operator_key_id_canonical": _pred_opt_str(predicate, "operator_key_id"),
+        "authorized_operator": _pred_opt_str(predicate, "authorized_operator"),
+        "organization": _pred_opt_str(predicate, "organization"),
+        "tsa_public_key_hex": tsa_public_key_hex_l,
+        "tsa_signature_hex": tsa_signature_hex_l,
+        "rfc3161_token_b64": rfc3161_b64,
+        "tsa": predicate.get("tsa") if isinstance(predicate.get("tsa"), dict) else None,
+    }
+
+
+def _legacy_json_canonical_payload(parsed: dict) -> bytes:
+    """Legacy OSS JSON canonicalization (sha256 key) for key-absent tri-state only."""
+    payload_obj = {
+        "target": parsed["target"],
+        "range_start": int(parsed["range_start"]),
+        "range_end": int(parsed["range_end"]),
+        "timestamp": parsed["timestamp"],
+        "sha256": str(parsed["file_digest"]).lower(),
     }
     return json.dumps(payload_obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def _build_payload_for_version(parsed: dict, payload_version: int) -> bytes:
+    okid = parsed.get("operator_key_id_canonical")
+    if not okid:
+        raw = str(parsed.get("operator_key_id") or "").strip()
+        okid = raw or None
+    return build_canonical_payload(
+        str(parsed["target"]),
+        int(parsed["range_start"]),
+        int(parsed["range_end"]),
+        str(parsed["timestamp"]),
+        str(parsed["file_digest"]),
+        str(parsed.get("digest_algo") or "sha256"),
+        payload_version=payload_version,
+        operator_id=parsed.get("operator_id"),
+        operator_key_id=okid,
+        authorized_operator=parsed.get("authorized_operator"),
+        organization=parsed.get("organization"),
+    )
+
+
+def _verify_ed25519_pick_payload(parsed: dict) -> bytes:
+    """
+    Return the payload bytes that verify the Ed25519 signature.
+    When canonical_payload_version is absent, try V2 line, V1 line, then legacy JSON.
+    When explicit 1 or 2, only that line format (no JSON fallback).
+    """
+    explicit = bool(parsed.get("canonical_payload_version_explicit"))
+    pk = str(parsed["public_key_hex"])
+    sig = str(parsed["signature_hex"])
+    if explicit:
+        v = int(parsed["canonical_payload_version"])
+        payload = _build_payload_for_version(parsed, v)
+        _verify_ed25519_f33(pk, sig, payload)
+        return payload
+    last_err: Exception | None = None
+    for pv in (2, 1):
+        try:
+            payload = _build_payload_for_version(parsed, pv)
+            _verify_ed25519_f33(pk, sig, payload)
+            return payload
+        except Exception as e:
+            last_err = e
+    try:
+        legacy = _legacy_json_canonical_payload(parsed)
+        _verify_ed25519_f33(pk, sig, legacy)
+        return legacy
+    except Exception as e:
+        last_err = e
+    raise last_err or RuntimeError("Ed25519 verification failed")
+
+
+def _registry_path_from_env() -> str:
+    return str(os.environ.get("F33_KEY_REGISTRY_PATH") or "").strip()
+
+
+def _parse_utc(ts: str) -> datetime | None:
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _validate_key_registry_window(parsed: dict) -> None:
+    operator_key_id = str(parsed.get("operator_key_id") or "").strip()
+    if not operator_key_id:
+        return
+    reg_path = _registry_path_from_env()
+    if not reg_path:
+        raise ValueError("operator_key_id present but F33_KEY_REGISTRY_PATH is not set")
+    if not os.path.isfile(path_for_kernel(reg_path)):
+        raise ValueError("operator_key_id present but public-key registry file is missing or unreadable")
+    with open(path_for_kernel(reg_path), encoding="utf-8") as f:
+        reg = json.load(f)
+    keys = reg.get("keys", []) if isinstance(reg, dict) else []
+    signed_at = _parse_utc(str(parsed.get("timestamp") or ""))
+    if signed_at is None:
+        raise ValueError("invalid signature timestamp for registry validation")
+    matched = False
+    for row in keys if isinstance(keys, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("operator_key_id") or "") != operator_key_id:
+            continue
+        pub_hex = str(row.get("public_key_hex") or "").lower()
+        if pub_hex and pub_hex != str(parsed.get("public_key_hex") or "").lower():
+            continue
+        valid_from = _parse_utc(str(row.get("valid_from") or ""))
+        valid_to = _parse_utc(str(row.get("valid_to") or "")) if row.get("valid_to") else None
+        if valid_from is None:
+            continue
+        if signed_at < valid_from:
+            continue
+        if valid_to is not None and signed_at > valid_to:
+            continue
+        matched = True
+        break
+    if not matched:
+        raise ValueError("public-key registry validity check failed for operator_key_id")
 
 
 def _verify_ed25519_f33(public_key_hex: str, signature_hex: str, payload_bytes: bytes) -> None:
@@ -486,34 +826,33 @@ def _verify_manifest_ed25519_signature(
 
 
 def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None, verify_tsa: bool = False) -> tuple[bool, str]:
-    """Verify .f33 sidecar: resolve target, hash range, check SHA-256 and Ed25519. Returns (success, message)."""
-    parsed = _parse_f33(sidecar_path)
+    """Verify .f33 sidecar: resolve target, hash range, check digest and Ed25519. Returns (success, message)."""
+    try:
+        parsed = _parse_f33(sidecar_path)
+    except ValueError:
+        return False, "[ ERR_INVALID_SEAL_FORMAT ]"
     base = os.path.dirname(os.path.abspath(sidecar_path)) if target_dir is None else target_dir
     target_path = os.path.join(base, parsed["target"])
-    payload = _canonical_payload_f33(
-        parsed["target"],
-        parsed["range_start"],
-        parsed["range_end"],
-        parsed["timestamp"],
-        parsed["sha256"],
-    )
     if not os.path.isfile(path_for_kernel(target_path)):
         return False, f"Target file not found: {target_path}"
     try:
-        _verify_ed25519_f33(parsed["public_key_hex"], parsed["signature_hex"], payload)
+        _validate_key_registry_window(parsed)
+        payload = _verify_ed25519_pick_payload(parsed)
     except Exception as e:
         return False, f"{_ERR_BAD_SIGNATURE} {e}"
     if verify_tsa:
         tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
         if not tsa_ok:
             return False, tsa_msg
-    computed = hash_file_range(
-        target_path,
-        parsed["range_start"],
-        parsed["range_end"],
+    algo = str(parsed.get("digest_algo") or "sha256").lower()
+    computed = hash_file(
+        path_for_kernel(target_path),
+        algo=algo,
+        start=int(parsed["range_start"]),
+        end=int(parsed["range_end"]),
     )
-    if computed != parsed["sha256"]:
-        return False, f"{_ERR_DATA_DRIFT} computed {computed}, expected {parsed['sha256']}"
+    if computed.lower() != str(parsed["file_digest"]).lower():
+        return False, f"{_ERR_DATA_DRIFT} computed {computed}, expected {parsed['file_digest']}"
     return True, "VERIFIED"
 
 
@@ -600,6 +939,17 @@ def verify_directory_from_manifest(
         print("[SYS] Building manifest tree...", end="", file=sys.stderr)
         sys.stderr.flush()
     manifest, roots = load_manifest(manifest_path, fallback_root_dir=root_dir)
+    try:
+        with open(path_for_kernel(manifest_path), encoding="utf-8") as mf:
+            raw_manifest_obj = json.load(mf)
+        if isinstance(raw_manifest_obj, dict):
+            ok_ch, ch_err = verify_manifest_hash_chain(raw_manifest_obj)
+            if not ok_ch:
+                raise ValueError(ch_err)
+    except ValueError:
+        raise
+    except Exception:
+        pass
     roots_resolved = roots if roots else [os.path.abspath(root_dir)]
     ignore_patterns = tuple(ignore_patterns or ())
     exclude_dir_set = {d for d in (exclude_dirs or ())}
@@ -644,6 +994,8 @@ def verify_directory_from_manifest(
             rel_dir = os.path.relpath(dirpath, walk_root)
             rel_dir = "" if rel_dir == "." else rel_dir
             for name in filenames:
+                if name.endswith(".f33") or name == "fors33-manifest.json":
+                    continue
                 rel_path = os.path.join(rel_dir, name) if rel_dir else name
                 norm_rel = rel_path.replace("\\", "/")
                 if ignore_patterns and any(
@@ -696,22 +1048,16 @@ def verify_directory_from_manifest(
             if not os.path.isfile(path_for_kernel(sidecar_path)):
                 return ("missing_seal", work_key, rel, algo, expected, None, _ERR_MISSING_SEAL)
             parsed = _parse_f33(sidecar_path)
-            payload = _canonical_payload_f33(
-                parsed["target"],
-                parsed["range_start"],
-                parsed["range_end"],
-                parsed["timestamp"],
-                parsed["sha256"],
-            )
             try:
-                _verify_ed25519_f33(parsed["public_key_hex"], parsed["signature_hex"], payload)
+                _validate_key_registry_window(parsed)
+                payload = _verify_ed25519_pick_payload(parsed)
             except Exception as e:
                 return ("bad_signature", work_key, rel, algo, expected, None, f"{_ERR_BAD_SIGNATURE} {e}")
             if verify_tsa:
                 tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
                 if not tsa_ok:
                     return ("tsa_invalid", work_key, rel, algo, expected, None, tsa_msg)
-            sidecar_digest = str(parsed["sha256"]).lower()
+            sidecar_digest = str(parsed["file_digest"]).lower()
             if sidecar_digest != expected.lower():
                 _abort_event.set()
                 raise ManifestCompromisedError(rel, expected, sidecar_digest)
@@ -779,7 +1125,7 @@ def verify_directory_from_manifest(
             return ("seal_broken", work_key, rel, algo, expected, computed.lower(), _ERR_DATA_DRIFT)
         return ("ok", work_key, rel, algo, expected, None, None)
 
-    executor = ThreadPoolExecutor(max_workers=_effective_worker_count(max_workers))
+    executor = ThreadPoolExecutor(max_workers=resolve_manifest_worker_count(max_workers))
     try:
         for kind, wk, rel, algo, expected, computed, err in executor.map(
             _hash_worker, _work_generator()
@@ -1086,13 +1432,6 @@ def main() -> int:
     if os.environ.get("FORS33_EXCLUDE_DIR"):
         dirs = [d.strip() for d in os.environ["FORS33_EXCLUDE_DIR"].split(",") if d.strip()]
         args.exclude_dir = list(args.exclude_dir or []) + dirs
-    if os.environ.get("FORS33_WORKERS"):
-        try:
-            args.workers = int(os.environ["FORS33_WORKERS"].strip())
-        except ValueError:
-            print("[ERROR] FORS33_WORKERS must be an integer.", file=sys.stderr)
-            return EXIT_USAGE
-
     target_dir = getattr(args, "root_dir", None) or getattr(args, "target_dir_deprecated", None)
 
     if args.algo == "blake3":
@@ -1108,6 +1447,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+
+    reg_path = str(os.environ.get("F33_KEY_REGISTRY_PATH") or "").strip()
+    if reg_path:
+        kreg = path_for_kernel(reg_path)
+        if not os.path.isfile(kreg):
+            print("[ERROR] F33_KEY_REGISTRY_PATH is set but the file does not exist.", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            with open(kreg, encoding="utf-8") as rf:
+                rf.read(1)
+        except OSError as e:
+            print(f"[ERROR] F33_KEY_REGISTRY_PATH is not readable: {e}", file=sys.stderr)
+            return EXIT_USAGE
 
     # Legacy single-file sidecar verification path (backwards compatible).
     if args.mode == "single" and args.sidecar:
@@ -1150,6 +1502,11 @@ def main() -> int:
         ignore_list = list(args.ignore_pattern or []) + _load_f33ignore_patterns(root_dir)
         ignore_list.extend(["*.f33", "fors33-manifest.json", "**/fors33-manifest.json"])
         try:
+            worker_n = resolve_manifest_worker_count(args.workers)
+        except ValueError as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            return EXIT_USAGE
+        try:
             report = execute_verification(
                 manifest_path=manifest_path,
                 root_dir=root_dir,
@@ -1161,7 +1518,7 @@ def main() -> int:
                 progress_event_callback=None,
                 strip_mount_prefix=args.strip_mount_prefix or "",
                 verify_tsa=args.verify_tsa,
-                max_workers=args.workers,
+                max_workers=worker_n,
             )
             result = {
                 "schema_version": report.schema_version,

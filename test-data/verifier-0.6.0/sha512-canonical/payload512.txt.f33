@@ -1,0 +1,20 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "payload512.txt",
+      "digest": {
+        "sha512": "fd5adbd27d49cf9e13ce4dc967e71b6a2a96e713c561d84bc6a79e89e6c4c323f1faf9fb5f59c83eb11951d65e5aea7998d5d193fc2d5b08a2f51b78c8bbb49f"
+      }
+    }
+  ],
+  "predicateType": "https://fors33.com/attestation/v1",
+  "predicate": {
+    "byte_start": 0,
+    "byte_end": 61,
+    "timestamp": "2026-04-16T14:31:48Z",
+    "public_key_hex": "3cc0af4ae2b54b0fc38408d14726b934f148d2f8e1c3b82cee6a7e8ec7c9600e",
+    "signature_hex": "05bacd9e56cc8a6a07ad7921d56480d247e1ca7a3634dc81c231600c4ed3c100a951072ff3c04dd1d5dac5b0e1f2dc3c84e7928d480b2d40f2006273853d560a",
+    "canonical_payload_version": 2
+  }
+}

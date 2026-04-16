@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.5.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-0.6.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.5.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-0.6.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -17,7 +17,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.5.0`) and **`push_latest`**—it does **not** run automatically on git tags.
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.6.0`) and **`push_latest`**—it does **not** run automatically on git tags.
 
 ## Usage
 
@@ -66,7 +66,13 @@ Optional TSA verification for JSON `.f33` sidecars:
 fors33-verifier --mode manifest --verify-tsa --file ./manifest.json --root ./root --format json
 ```
 
-With `--verify-tsa`, the verifier accepts **`predicate.tsa.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, and **message imprint** (hash OID from the token) over the same **canonical JSON** payload used for the main Ed25519 signature. MD5/SHA-1 imprint algorithms are rejected.
+With `--verify-tsa`, the verifier accepts **`predicate.tsa.rfc3161_token_b64`** or top-level **`predicate.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, and **message imprint** (hash OID from the token) over the same **canonical attestation bytes** used for the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent). MD5/SHA-1 imprint algorithms are rejected.
+
+## Legacy OpenPGP / GnuPG and fors33-verifier (separation of concerns)
+
+This package deliberately keeps a **narrow execution path**: Ed25519-signed JSON `.f33` attestations, standard checksum sidecars (`.sha256`, `.sha512`, `.md5`), and manifest verification. It does **not** parse or verify **OpenPGP** (`.asc`, detached PGP signatures, keyrings).
+
+For **legacy PGP / GnuPG** artifacts, use the tooling your organization already trusts—for example **`gpg --verify`** against the signer’s public key and the detached signature file—**alongside** fors33-verifier for **deterministic `.f33` supply-chain attestations** and **published hash baselines**. The two roles are complementary: GnuPG answers “was this blob signed by this PGP key?”; fors33-verifier answers “does this file or tree match the attested digest and seal metadata we ship in the kit?” without pulling OpenPGP into the verifier’s dependency or attack surface.
 
 **Manifest hashing workers** (thread pool only):
 
@@ -74,9 +80,11 @@ With `--verify-tsa`, the verifier accepts **`predicate.tsa.rfc3161_token_b64`** 
 fors33-verifier --mode manifest --workers 8 --file ./manifest.json --root ./root
 ```
 
-`FORS33_WORKERS` overrides `--workers` after arguments are parsed. If unset, `<= 0`, or invalid, the default is `_default_worker_count()` (or `4` when `FORS33_EXTENSION_MODE=1`), capped at `64` when explicitly set.
+Worker count: **positive `--workers`** wins; otherwise a **positive `FORS33_WORKERS`**; otherwise **`default_dpk_worker_count()`** (uses `cpu_count` and optional `FORS33_DPK_MAX_WORKERS`). Non-positive values mean auto. Hard cap **64**.
 
-**Large-file hashing** (`hash_core`): optional mmap window controlled by `FORS33_MMAP_MIN_MB` and `FORS33_MMAP_MAX_MB` (defaults `500` and `4000`). Optional global read throttle: `set_global_read_bytes_per_second` (for hosted/extension use).
+**Operator registry**: when **`F33_KEY_REGISTRY_PATH`** is set to a non-empty path, that file must exist and be readable before verification starts. When unset or empty, registry checks are skipped.
+
+**Large-file hashing** (`hash_core`): mmap window uses `FORS33_MMAP_MIN_MB` / `FORS33_MMAP_MAX_MB` (defaults `500` / `4000`), clamped to cgroup/RAM ceiling on Linux; optional **`FORS33_MMAP_PSI_SOME_AVG10_MAX`** disables mmap when cgroup v2 memory pressure `some avg10` exceeds the threshold. Optional global read throttle: `set_global_read_bytes_per_second` (extension use; shipped CLI does not set it).
 
 ## Output
 
@@ -93,6 +101,8 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 ## GitHub Action (CI/CD)
 
 Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
+
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.6.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
@@ -116,10 +126,12 @@ The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33/fors33-verifier:latest --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33/fors33-verifier:0.6.0 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:latest --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:0.6.0 --file /data/file.csv --expected-hash <sha256>
 ```
+
+`:latest` is convenient for exploration; pin a **version tag** or **digest** in production pipelines so runs stay reproducible.
 
 ## URL-only API
 

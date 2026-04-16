@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "chain_version": "1",
+  "entries": [
+    {
+      "path": "payload.txt",
+      "sha256": "7caaa041444af8449e4fcf348dcf996da1351a12333a1eb57131d932a0a7e49e",
+      "hash_algo": "sha256",
+      "previous_entry_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

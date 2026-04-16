@@ -1,0 +1,1 @@
+SHA512 canonical payload fixture for fors33-verifier 0.6.0.

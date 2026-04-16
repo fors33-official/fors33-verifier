@@ -27,4 +27,4 @@ inputs:
 # Exit code: 0 = verified, 1 = mismatch (fails job), 2 = error. No outputs from container.
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/fors33/fors33-verifier:latest'
+  image: 'docker://ghcr.io/fors33/fors33-verifier:0.6.0'

@@ -16,7 +16,11 @@ Use the fors33-verifier package. Install with `pip install fors33-verifier`. For
 
 ## How do I verify a directory against a manifest?
 
-`fors33-verifier --mode manifest --file /path/to/manifest.json --root /path/to/root`. Supports GNU coreutils checksum text, BSD/OpenSSL format, and JSON manifests. Use `--format json` for structured output. `--target-dir` is a deprecated alias for `--root`.
+`fors33-verifier --mode manifest --file /path/to/manifest.json --root /path/to/root`. Supports GNU coreutils checksum text, BSD/OpenSSL format, and JSON manifests (including `entries` / `subject` shapes and optional `chain_version` hash chain). Use `--format json` for structured output. `--target-dir` is a deprecated alias for `--root`.
+
+Workers: positive `--workers` overrides non-positive `FORS33_WORKERS`; otherwise `default_dpk_worker_count()` with optional `FORS33_DPK_MAX_WORKERS`. `F33_KEY_REGISTRY_PATH` when non-empty must point to a readable operator registry file.
+
+`.f33` sidecars use in-toto Statement v0.1 or v1; Ed25519 verifies line-oriented V1/V2 canonical payloads or legacy JSON when `canonical_payload_version` is absent.
 
 ## Keywords
 

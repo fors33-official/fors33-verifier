@@ -2,6 +2,23 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.6.0] - 2026-04-16
+
+### Added
+
+- **`manifest_core`**: `entries` / `subject` JSON manifest shapes, path normalization, `verify_manifest_hash_chain` for `chain_version == "1"`, `MANIFEST_GENESIS_PREVIOUS_HASH`.
+- **Manifest mode**: hash-chain verification on raw JSON manifest before filesystem walk; `.f33` / `fors33-manifest.json` excluded from created-file drift walk.
+- **`.f33`**: in-toto Statement **v0.1** and **v1** `_type`; every `subject[]` digest validated; predicate `byte_start`/`byte_end` plus legacy `range` / `range_start`/`range_end` / nested `signature`; SHA-512 sidecars; RFC3161 token on `predicate` or nested `predicate.tsa`.
+- **Canonical payload**: inline `build_canonical_payload` (V1/V2 line-oriented UTF-8) with tri-state routing when `canonical_payload_version` is absent (try V2, V1, legacy JSON); explicit `1`/`2` is strict (no JSON fallback for `2`, no JSON for `1`).
+- **`F33_KEY_REGISTRY_PATH`**: non-empty env requires an existing readable registry file before verification; optional `operator_key_id` validity window when set in the sidecar.
+- **`hash_core`**: cgroup/RAM mmap ceiling, optional `FORS33_MMAP_PSI_SOME_AVG10_MAX`, `default_dpk_worker_count()` with `FORS33_DPK_MAX_WORKERS`; verifier-only read throttle retained.
+- **Fixtures**: `test-data/verifier-0.6.0/` for manifest hash chain, in-toto v1 `_type`, and **SHA-512** canonical payload / `subject.digest.sha512` (see README in that folder).
+
+### Changed
+
+- **Workers**: positive `--workers` wins; else positive `FORS33_WORKERS`; else `default_dpk_worker_count()` (no `FORS33_EXTENSION_MODE`); cap **64**; `FORS33_WORKERS` no longer overrides a positive CLI value.
+- **`requirements-release.txt`**: **`cryptography==46.0.7`** with pinned hashes (musllinux / manylinux / win_amd64 wheels) for Docker Scout–driven security updates.
+
 ## [0.5.0] - 2026-03-31
 
 ### Added

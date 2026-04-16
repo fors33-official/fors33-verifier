@@ -4,16 +4,21 @@ Shared hashing utilities for fors33-verifier.
 
 Supports SHA-256 (default), SHA-512, MD5, SHA-1, and optional BLAKE3 with
 streaming, chunk-based hashing suitable for large files.
+
+Parity (0.6.0): cgroup/RAM mmap bounds, PSI gate, and default_dpk_worker_count match
+fors33-scanner/hash_core.py; this tree additionally exposes set_global_read_bytes_per_second
+and _throttle_before_read for extension/hosted use (chunked reads only).
 """
 from __future__ import annotations
 
+import hashlib
 import mmap
 import os
+import re
+import sys
 import threading
 import time
 from typing import Callable, Iterable, Optional
-
-import hashlib
 
 # Global read-rate limit (bytes/sec) for chunked reads; None disables throttling.
 _io_bucket_lock = threading.Lock()
@@ -102,6 +107,166 @@ def path_from_kernel(path: str) -> str:
     return path
 
 
+def _read_first_line_int_bytes(path: str) -> Optional[int]:
+    """Read a single cgroup limit file; return positive bytes or None if max/unlimited/unreadable."""
+    try:
+        with open(path, encoding="ascii", errors="replace") as f:
+            raw = f.read().strip()
+    except OSError:
+        return None
+    if not raw or raw.lower() == "max":
+        return None
+    try:
+        v = int(raw, 10)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def _linux_cgroup_v2_rel_path() -> Optional[str]:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/self/cgroup", encoding="ascii", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("0::"):
+                    tail = line[3:].strip()
+                    if not tail or tail == "/":
+                        return "/"
+                    return tail if tail.startswith("/") else "/" + tail
+    except OSError:
+        return None
+    return None
+
+
+def _cgroup_v2_dir() -> Optional[str]:
+    rel = _linux_cgroup_v2_rel_path()
+    if rel is None:
+        return None
+    base = "/sys/fs/cgroup"
+    if rel in ("/", ""):
+        return base
+    return os.path.normpath(base + rel)
+
+
+def _memory_ceiling_bytes_linux() -> Optional[int]:
+    """
+    Host/container memory ceiling (fallback chain):
+    cgroup v2 memory.max, else cgroup v1 memory.limit_in_bytes, else visible RAM.
+    """
+    cg2 = _cgroup_v2_dir()
+    if cg2:
+        v = _read_first_line_int_bytes(os.path.join(cg2, "memory.max"))
+        if v is not None:
+            return v
+    try:
+        with open("/proc/self/cgroup", encoding="ascii", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        lines = []
+    mem_rel: Optional[str] = None
+    for line in lines:
+        parts = line.strip().split(":")
+        if len(parts) >= 3 and "memory" in parts[1].split(","):
+            mem_rel = parts[2]
+            break
+    if mem_rel:
+        v1_path = os.path.normpath("/sys/fs/cgroup/memory" + (mem_rel if mem_rel.startswith("/") else "/" + mem_rel))
+        lim = _read_first_line_int_bytes(os.path.join(v1_path, "memory.limit_in_bytes"))
+        if lim is not None:
+            huge = 1 << 60
+            if lim < huge:
+                return lim
+    try:
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        psize = int(os.sysconf("SC_PAGE_SIZE"))
+        if pages > 0 and psize > 0:
+            return pages * psize
+    except (ValueError, OSError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def _memory_ceiling_bytes() -> Optional[int]:
+    if sys.platform.startswith("linux"):
+        return _memory_ceiling_bytes_linux()
+    if os.name != "nt":
+        try:
+            pages = int(os.sysconf("SC_PHYS_PAGES"))
+            psize = int(os.sysconf("SC_PAGE_SIZE"))
+            if pages > 0 and psize > 0:
+                return pages * psize
+        except (ValueError, OSError, AttributeError, TypeError):
+            pass
+    return None
+
+
+def _cgroup_v2_memory_pressure_some_avg10() -> Optional[float]:
+    """Parse memory.pressure 'some' line avg10 for this process cgroup; None if missing or unusable."""
+    cg2 = _cgroup_v2_dir()
+    if not cg2:
+        return None
+    path = os.path.join(cg2, "memory.pressure")
+    try:
+        with open(path, encoding="ascii", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("some"):
+            continue
+        m = re.search(r"avg10=([0-9.]+)", line)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _mmap_psi_disables_mmap() -> bool:
+    raw = os.environ.get("FORS33_MMAP_PSI_SOME_AVG10_MAX", "").strip()
+    if not raw:
+        return False
+    try:
+        cap = float(raw)
+    except ValueError:
+        return False
+    if cap < 0.0:
+        return False
+    avg10 = _cgroup_v2_memory_pressure_some_avg10()
+    if avg10 is None:
+        return False
+    return avg10 > cap
+
+
+def _effective_mmap_bounds_bytes() -> tuple[int, int]:
+    """
+    Return (mmap_min_bytes, mmap_max_bytes) after cgroup/RAM ceiling and env overrides.
+
+    Order: cgroup v2 max, v1 limit, RAM for ceiling; then clamp user FORS33_MMAP_MAX_MB
+    to ceiling; FORS33_MMAP_MIN_MB / defaults applied last.
+    """
+    mmap_min_mb = int(os.environ.get("FORS33_MMAP_MIN_MB", "500"))
+    mmap_max_mb = int(os.environ.get("FORS33_MMAP_MAX_MB", "4000"))
+    mmap_min_b = max(0, mmap_min_mb) * 1024 * 1024
+    mmap_max_b = max(0, mmap_max_mb) * 1024 * 1024
+    ceiling = _memory_ceiling_bytes()
+    if ceiling is not None:
+        reserve = 64 * 1024 * 1024
+        cap_b = max(0, ceiling - reserve)
+        if mmap_max_b > 0:
+            mmap_max_b = min(mmap_max_b, cap_b)
+        else:
+            mmap_max_b = cap_b
+    if mmap_max_b > 0 and mmap_min_b > mmap_max_b:
+        mmap_min_b = mmap_max_b
+    return mmap_min_b, mmap_max_b
+
+
 def infer_algo_from_digest(hex_str: str) -> Optional[str]:
     """Infer hash algorithm from hex digest length, when possible.
 
@@ -145,12 +310,14 @@ def hash_file(
         except OSError:
             pass
 
-    mmap_min = int(os.environ.get("FORS33_MMAP_MIN_MB", "500")) * 1024 * 1024
-    mmap_max = int(os.environ.get("FORS33_MMAP_MAX_MB", "4000")) * 1024 * 1024
+    mmap_min, mmap_max = _effective_mmap_bounds_bytes()
+    psi_mmap_off = _mmap_psi_disables_mmap()
     can_try_mmap = (
-        remaining is None
+        not psi_mmap_off
+        and remaining is None
         and end is None
         and start == 0
+        and mmap_max > 0
         and total_bytes >= mmap_min
         and total_bytes <= mmap_max
     )
@@ -202,3 +369,18 @@ def hash_stream(
         if chunk:
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def default_dpk_worker_count() -> int:
+    """Shared worker cap for scan_dpk and verify_dpk (FORS33_DPK_MAX_WORKERS clamps cpu-based default)."""
+    n = os.cpu_count() or 1
+    w = min(32, max(1, n))
+    cap = os.environ.get("FORS33_DPK_MAX_WORKERS", "").strip()
+    if cap:
+        try:
+            c = int(cap, 10)
+            if c >= 1:
+                w = min(w, c)
+        except ValueError:
+            pass
+    return w

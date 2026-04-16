@@ -1,0 +1,22 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "payload.txt",
+      "digest": {
+        "sha256": "7caaa041444af8449e4fcf348dcf996da1351a12333a1eb57131d932a0a7e49e"
+      }
+    }
+  ],
+  "predicate": {
+    "range": {
+      "start": 0,
+      "end": 24
+    },
+    "timestamp": "2026-03-24T00:00:00Z",
+    "signature": {
+      "public_key_hex": "19e7282447fdeeece0253df5047971727183b7dd1a0898517804c6096c83c79f",
+      "signature_hex": "47d4ea64b56e6e604aad4520e1b0eeb643e093f56400d1dc707ab1c437e35450a04dcd96d428a56f420eaf81e329d9cf6962c1220959fe7dc69acb01046c880c"
+    }
+  }
+}
