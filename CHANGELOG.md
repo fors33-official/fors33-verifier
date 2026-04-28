@@ -2,6 +2,29 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.7.0] - 2026-04-28
+
+### Added
+
+- **Portable verification receipts**: `--verify-receipt` for standalone JSON receipt verification containing dataset digest and Ed25519 signature. Receipts enable offline verification without requiring the original verifier daemon.
+- **Audit package verification**: `--audit-package`, `--sig`, `--pubkey` for verifying detached Ed25519 signatures of PDF audit packages. Enables independent auditors to verify compliance reports.
+- **Smart file routing**: Automatic detection and routing for ZIP archives and PDF files via `--file` argument. Zero-copy ZIP extraction for security (no disk I/O). Auto-discovery of .sig and .pem files in same directory as PDF.
+- **Source fingerprinting support**: Passive support for `source_fingerprint` field in sidecar predicates. Verifier preserves and displays TLS fingerprint metadata when present (deferred Rust implementation for active fingerprinting).
+- **Enhanced TSA metadata**: Support for new `predicate.tsa.response_token` format with richer metadata structure. Backward compatible with legacy `predicate.tsa.rfc3161_token_b64` format.
+- **Bytes-based cryptography**: Centralized `_verify_detached_signature_bytes()` helper for signature verification using raw bytes, eliminating code duplication.
+
+### Changed
+
+- **TSA token parsing**: Priority check for `predicate.tsa.response_token` (new format) with fallback to `predicate.tsa.rfc3161_token_b64` (legacy format) and top-level `predicate.rfc3161_token_b64`.
+- **Backward compatibility**: Smart routing for `--file` only triggers when NOT performing standard hash checks (absence of `--expected-hash` or `--record`). Existing CI/CD pipelines using `--file archive.zip --expected-hash <hex>` continue to work for standard hashing.
+- **Architectural separation**: Receipt generation remains in internal daemon (requires private key access). OSS verifier implements verification only, maintaining stateless zero-trust architecture.
+
+### Security
+
+- **Zero-copy ZIP extraction**: Files read directly from ZIP using `z.read()`, never extracted to disk to prevent malicious archive attacks.
+- **Clinical error messages**: Clear, actionable error messages for missing signature files without exposing raw exceptions.
+- **path_for_kernel() clarification**: Used for Windows long-path compatibility (\\?\UNC\...), not Docker VM path translation.
+
 ## [0.6.0] - 2026-04-16
 
 ### Added

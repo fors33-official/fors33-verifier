@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.6.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-0.7.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.6.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-0.7.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -17,7 +17,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.6.0`) and **`push_latest`**—it does **not** run automatically on git tags.
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.7.0`) and **`push_latest`**—it does **not** run automatically on git tags.
 
 ## Usage
 
@@ -66,7 +66,24 @@ Optional TSA verification for JSON `.f33` sidecars:
 fors33-verifier --mode manifest --verify-tsa --file ./manifest.json --root ./root --format json
 ```
 
-With `--verify-tsa`, the verifier accepts **`predicate.tsa.rfc3161_token_b64`** or top-level **`predicate.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, and **message imprint** (hash OID from the token) over the same **canonical attestation bytes** used for the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent). MD5/SHA-1 imprint algorithms are rejected.
+With `--verify-tsa`, the verifier accepts **`predicate.tsa.response_token`** (new enhanced format) or **`predicate.tsa.rfc3161_token_b64`** (legacy format) or top-level **`predicate.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, and **message imprint** (hash OID from the token) over the same **canonical attestation bytes** used for the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent). MD5/SHA-1 imprint algorithms are rejected.
+
+**Receipt verification (standalone dataset verification):**
+```bash
+fors33-verifier --verify-receipt receipt.json --root ./dataset
+```
+Verifies a portable JSON receipt containing dataset digest and Ed25519 signature. Receipts enable offline verification without requiring the original verifier daemon.
+
+**Audit package verification (PDF with detached signature):**
+```bash
+# Explicit flags
+fors33-verifier --audit-package report.pdf --sig report.sig --pubkey public_key.pem
+
+# Smart routing (automatic detection)
+fors33-verifier --file report.pdf
+fors33-verifier --file audit_package.zip
+```
+Verifies detached Ed25519 signatures of PDF audit packages. Smart routing automatically detects ZIP archives and PDF files, discovering associated .sig and .pem files in the same directory.
 
 ## Legacy OpenPGP / GnuPG and fors33-verifier (separation of concerns)
 
@@ -102,7 +119,7 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.6.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.7.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
@@ -126,9 +143,9 @@ The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33/fors33-verifier:0.6.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33/fors33-verifier:0.7.0 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:0.6.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:0.7.0 --file /data/file.csv --expected-hash <sha256>
 ```
 
 `:latest` is convenient for exploration; pin a **version tag** or **digest** in production pipelines so runs stay reproducible.

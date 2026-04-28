@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fors33-verifier"
-version = "0.6.0"
+version = "0.7.0"
 description = "Verify attested data segments. Standalone SHA-256 verification for data provenance."
 readme = "README.md"
 license = "MIT"
@@ -31,4 +31,4 @@ fors33-verifier = "verify_dpk:main"
 include = []
 
 [tool.setuptools]
-py-modules = ["verify_dpk", "manifest_core", "hash_core"]
+py-modules = ["verify_dpk", "manifest_core", "hash_core", "receipt_core"]

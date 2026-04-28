@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -426,14 +427,24 @@ def _parse_f33(sidecar_path: str) -> dict:
     tsa_public_key_hex_l = tsa_public_key_hex.lower() if isinstance(tsa_public_key_hex, str) else None
     tsa_signature_hex_l = tsa_signature_hex.lower() if isinstance(tsa_signature_hex, str) else None
 
-    rfc3161_raw = predicate.get("rfc3161_token_b64")
-    rfc3161_b64 = rfc3161_raw.strip() if isinstance(rfc3161_raw, str) and rfc3161_raw.strip() else None
+    # TSA token parsing: check new format (predicate.tsa.response_token) first, fallback to old format
+    rfc3161_b64 = None
+    tsa_obj = predicate.get("tsa")
+    if isinstance(tsa_obj, dict):
+        # New format: predicate.tsa.response_token
+        nested = tsa_obj.get("response_token")
+        if isinstance(nested, str) and nested.strip():
+            rfc3161_b64 = nested.strip()
+        # Fallback to old format: predicate.tsa.rfc3161_token_b64
+        if not rfc3161_b64:
+            nested_legacy = tsa_obj.get("rfc3161_token_b64")
+            if isinstance(nested_legacy, str) and nested_legacy.strip():
+                rfc3161_b64 = nested_legacy.strip()
+    
+    # Legacy top-level format: predicate.rfc3161_token_b64
     if not rfc3161_b64:
-        tsa_obj = predicate.get("tsa")
-        if isinstance(tsa_obj, dict):
-            nested = tsa_obj.get("rfc3161_token_b64")
-            if isinstance(nested, str) and nested.strip():
-                rfc3161_b64 = nested.strip()
+        rfc3161_raw = predicate.get("rfc3161_token_b64")
+        rfc3161_b64 = rfc3161_raw.strip() if isinstance(rfc3161_raw, str) and rfc3161_raw.strip() else None
 
     if digest_algo == "sha512":
         if len(file_hash_l) != 128 or any(c not in "0123456789abcdef" for c in file_hash_l):
@@ -461,6 +472,7 @@ def _parse_f33(sidecar_path: str) -> dict:
         "operator_key_id_canonical": _pred_opt_str(predicate, "operator_key_id"),
         "authorized_operator": _pred_opt_str(predicate, "authorized_operator"),
         "organization": _pred_opt_str(predicate, "organization"),
+        "source_fingerprint": _pred_opt_str(predicate, "source_fingerprint"),
         "tsa_public_key_hex": tsa_public_key_hex_l,
         "tsa_signature_hex": tsa_signature_hex_l,
         "rfc3161_token_b64": rfc3161_b64,
@@ -1313,6 +1325,79 @@ def execute_verification_single(
     return 1
 
 
+def _verify_detached_signature_bytes(pdf_bytes: bytes, sig_bytes: bytes, pubkey_pem: bytes) -> None:
+    """Verify Ed25519 detached signature on PDF bytes using public key."""
+    from cryptography.hazmat.primitives import serialization
+    
+    public_key = serialization.load_pem_public_key(pubkey_pem)
+    pdf_hash = hashlib.sha256(pdf_bytes).digest()
+    public_key.verify(sig_bytes, pdf_hash)
+
+
+def _extract_and_verify_zip(zip_path: str) -> None:
+    """Extract audit package files from ZIP in memory and verify signature (zero-copy, no disk I/O)."""
+    import zipfile
+    
+    pdf_bytes = None
+    sig_bytes = None
+    pubkey_pem = None
+    
+    try:
+        with zipfile.ZipFile(path_for_kernel(zip_path), 'r') as z:
+            for name in z.namelist():
+                if name.lower().endswith('.pdf'):
+                    pdf_bytes = z.read(name)
+                elif name.lower().endswith('.sig'):
+                    sig_bytes = z.read(name)
+                elif name.lower().endswith('.pem'):
+                    pubkey_pem = z.read(name)
+    except Exception as e:
+        raise ValueError(f"Failed to read ZIP archive: {e}")
+    
+    if pdf_bytes is None:
+        raise ValueError("[FAILURE] No PDF file found in audit package ZIP")
+    if sig_bytes is None:
+        raise ValueError("[FAILURE] No signature file (.sig) found in audit package ZIP")
+    if pubkey_pem is None:
+        raise ValueError("[FAILURE] No public key file (.pem) found in audit package ZIP")
+    
+    try:
+        _verify_detached_signature_bytes(pdf_bytes, sig_bytes, pubkey_pem)
+        print("[SUCCESS] Audit package signature verified")
+    except Exception as e:
+        raise ValueError(f"[FAILURE] Signature verification failed: {e}")
+
+
+def _discover_and_verify_pdf(pdf_path: str) -> None:
+    """Discover .sig and .pem files in same directory as PDF and verify signature."""
+    pdf_dir = os.path.dirname(os.path.abspath(pdf_path))
+    pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    
+    sig_path = os.path.join(pdf_dir, f"{pdf_name}.sig")
+    pubkey_path = os.path.join(pdf_dir, f"{pdf_name}.pem")
+    
+    if not os.path.isfile(path_for_kernel(sig_path)):
+        raise ValueError("[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF.")
+    if not os.path.isfile(path_for_kernel(pubkey_path)):
+        raise ValueError("[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF.")
+    
+    try:
+        with open(path_for_kernel(pdf_path), 'rb') as f:
+            pdf_bytes = f.read()
+        with open(path_for_kernel(sig_path), 'rb') as f:
+            sig_bytes = f.read()
+        with open(path_for_kernel(pubkey_path), 'rb') as f:
+            pubkey_pem = f.read()
+    except OSError as e:
+        raise ValueError(f"[FAILURE] Failed to read files: {e}")
+    
+    try:
+        _verify_detached_signature_bytes(pdf_bytes, sig_bytes, pubkey_pem)
+        print("[SUCCESS] Audit package signature verified")
+    except Exception as e:
+        raise ValueError(f"[FAILURE] Signature verification failed: {e}")
+
+
 def main() -> int:
     _print_compliance_notice()
     parser = argparse.ArgumentParser(
@@ -1417,6 +1502,18 @@ def main() -> int:
         action="store_true",
         help="Report all drift/tampering but always exit with code 0.",
     )
+    parser.add_argument(
+        "--verify-receipt",
+        help="Path to .f33-receipt file for standalone verification (requires --root for dataset directory).",
+    )
+    parser.add_argument(
+        "--audit-package",
+        help="Path to PDF file for audit package verification (detached signature mode).",
+    )
+    parser.add_argument(
+        "--sig",
+        help="Path to detached signature file (.sig) for audit package verification.",
+    )
     args = parser.parse_args()
 
     # Environment overrides (FORS33_*)
@@ -1460,6 +1557,55 @@ def main() -> int:
         except OSError as e:
             print(f"[ERROR] F33_KEY_REGISTRY_PATH is not readable: {e}", file=sys.stderr)
             return EXIT_USAGE
+
+    # Handle standalone receipt verification
+    if args.verify_receipt:
+        if not target_dir:
+            print("[ERROR] --root must be provided with --verify-receipt", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            from receipt_core import verify_receipt
+            ok = verify_receipt(args.verify_receipt, target_dir)
+            return EXIT_OK if ok else EXIT_DRIFT
+        except Exception as e:
+            print(f"[ERROR] Receipt verification failed: {e}", file=sys.stderr)
+            return EXIT_SEVERE
+
+    # Handle audit package verification with explicit flags
+    if args.audit_package:
+        if not args.sig or not args.pubkey:
+            print("[ERROR] --sig and --pubkey are required with --audit-package", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            with open(path_for_kernel(args.audit_package), 'rb') as f:
+                pdf_bytes = f.read()
+            with open(path_for_kernel(args.sig), 'rb') as f:
+                sig_bytes = f.read()
+            with open(path_for_kernel(args.pubkey), 'rb') as f:
+                pubkey_pem = f.read()
+            _verify_detached_signature_bytes(pdf_bytes, sig_bytes, pubkey_pem)
+            print("[SUCCESS] Audit package signature verified")
+            return EXIT_OK
+        except Exception as e:
+            print(f"[ERROR] Audit package verification failed: {e}", file=sys.stderr)
+            return EXIT_SEVERE
+
+    # Smart routing: if --file ends in .zip or .pdf AND no expected hash is provided, route to audit package
+    if args.file and not args.expected_hash and not args.record:
+        if args.file.lower().endswith('.zip'):
+            try:
+                _extract_and_verify_zip(args.file)
+                return EXIT_OK
+            except Exception as e:
+                print(f"[ERROR] Audit package verification failed: {e}", file=sys.stderr)
+                return EXIT_SEVERE
+        elif args.file.lower().endswith('.pdf'):
+            try:
+                _discover_and_verify_pdf(args.file)
+                return EXIT_OK
+            except Exception as e:
+                print(f"[ERROR] Audit package verification failed: {e}", file=sys.stderr)
+                return EXIT_SEVERE
 
     # Legacy single-file sidecar verification path (backwards compatible).
     if args.mode == "single" and args.sidecar:
