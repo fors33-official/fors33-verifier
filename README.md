@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.7.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-0.8.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.7.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-0.8.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -17,7 +17,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.7.0`) and **`push_latest`**—it does **not** run automatically on git tags.
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.8.0`) and **`push_latest`**—it does **not** run automatically on git tags.
 
 ## Usage
 
@@ -85,6 +85,19 @@ fors33-verifier --file audit_package.zip
 ```
 Verifies detached Ed25519 signatures of PDF audit packages. Smart routing automatically detects ZIP archives and PDF files, discovering associated .sig and .pem files in the same directory.
 
+**Batch verification (multiple audit packages):**
+```bash
+# Text output (default)
+fors33-verifier --directory /path/to/audit/packages
+
+# JSON output for CI/CD integration
+fors33-verifier --directory /path/to/audit/packages --json
+
+# With custom worker count
+fors33-verifier --directory /path/to/audit/packages --workers 16
+```
+Verifies multiple audit packages (PDF, ZIP, sealed datasets) in a single command with hardware-limited concurrent processing. Automatically discovers PDF files, ZIP archives, and sealed datasets (directories with `fors33-manifest.json` or `manifest.json`). Returns exit code 0 if all packages pass, 1 if any fail. JSON output includes per-package results and summary statistics for automated pipelines.
+
 ## Legacy OpenPGP / GnuPG and fors33-verifier (separation of concerns)
 
 This package deliberately keeps a **narrow execution path**: Ed25519-signed JSON `.f33` attestations, standard checksum sidecars (`.sha256`, `.sha512`, `.md5`), and manifest verification. It does **not** parse or verify **OpenPGP** (`.asc`, detached PGP signatures, keyrings).
@@ -143,9 +156,9 @@ The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33/fors33-verifier:0.7.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33/fors33-verifier:0.8.0 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:0.7.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:0.8.0 --file /data/file.csv --expected-hash <sha256>
 ```
 
 `:latest` is convenient for exploration; pin a **version tag** or **digest** in production pipelines so runs stay reproducible.

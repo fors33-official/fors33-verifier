@@ -57,7 +57,7 @@ _ERR_BAD_SIGNATURE = "[ TAMPER DETECTED: BAD SIGNATURE ]"
 _ERR_DATA_DRIFT = "[ SEAL BROKEN: DATA DRIFT ]"
 _ERR_TSA_INVALID = "[ ERR_INVALID_TSA ]"
 
-EXIT_OK = 0
+_EXIT_OK = 0
 EXIT_DRIFT = 1
 EXIT_USAGE = 2
 EXIT_SEVERE = 3
@@ -68,6 +68,18 @@ _COMPLIANCE_NOTICE_LINES = (
     "[NOTICE]  Validate results in your own compliance and audit workflow.",
     "[NOTICE]  Unauthorized use is prohibited.",
 )
+
+# Thread-safe print lock for batch mode
+print_lock = threading.Lock()
+
+
+@dataclass
+class BatchVerificationResult:
+    """Result of a single package verification in batch mode."""
+    file_path: str
+    package_type: str
+    status: str  # "SUCCESS" or "ERROR"
+    error_message: str | None = None
 
 
 def _print_compliance_notice() -> None:
@@ -1334,8 +1346,12 @@ def _verify_detached_signature_bytes(pdf_bytes: bytes, sig_bytes: bytes, pubkey_
     public_key.verify(sig_bytes, pdf_hash)
 
 
-def _extract_and_verify_zip(zip_path: str) -> None:
-    """Extract audit package files from ZIP in memory and verify signature (zero-copy, no disk I/O)."""
+def _extract_and_verify_zip(zip_path: str) -> dict:
+    """Extract audit package files from ZIP in memory and verify signature (zero-copy, no disk I/O).
+    
+    Returns:
+        dict: {'success': bool, 'error': str | None}
+    """
     import zipfile
     
     pdf_bytes = None
@@ -1352,24 +1368,28 @@ def _extract_and_verify_zip(zip_path: str) -> None:
                 elif name.lower().endswith('.pem'):
                     pubkey_pem = z.read(name)
     except Exception as e:
-        raise ValueError(f"Failed to read ZIP archive: {e}")
+        return {'success': False, 'error': f"Failed to read ZIP archive: {e}"}
     
     if pdf_bytes is None:
-        raise ValueError("[FAILURE] No PDF file found in audit package ZIP")
+        return {'success': False, 'error': "[FAILURE] No PDF file found in audit package ZIP"}
     if sig_bytes is None:
-        raise ValueError("[FAILURE] No signature file (.sig) found in audit package ZIP")
+        return {'success': False, 'error': "[FAILURE] No signature file (.sig) found in audit package ZIP"}
     if pubkey_pem is None:
-        raise ValueError("[FAILURE] No public key file (.pem) found in audit package ZIP")
+        return {'success': False, 'error': "[FAILURE] No public key file (.pem) found in audit package ZIP"}
     
     try:
         _verify_detached_signature_bytes(pdf_bytes, sig_bytes, pubkey_pem)
-        print("[SUCCESS] Audit package signature verified")
+        return {'success': True, 'error': None}
     except Exception as e:
-        raise ValueError(f"[FAILURE] Signature verification failed: {e}")
+        return {'success': False, 'error': f"[FAILURE] Signature verification failed: {e}"}
 
 
-def _discover_and_verify_pdf(pdf_path: str) -> None:
-    """Discover .sig and .pem files in same directory as PDF and verify signature."""
+def _discover_and_verify_pdf(pdf_path: str) -> dict:
+    """Discover .sig and .pem files in same directory as PDF and verify signature.
+    
+    Returns:
+        dict: {'success': bool, 'error': str | None}
+    """
     pdf_dir = os.path.dirname(os.path.abspath(pdf_path))
     pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
     
@@ -1377,9 +1397,9 @@ def _discover_and_verify_pdf(pdf_path: str) -> None:
     pubkey_path = os.path.join(pdf_dir, f"{pdf_name}.pem")
     
     if not os.path.isfile(path_for_kernel(sig_path)):
-        raise ValueError("[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF.")
+        return {'success': False, 'error': "[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF."}
     if not os.path.isfile(path_for_kernel(pubkey_path)):
-        raise ValueError("[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF.")
+        return {'success': False, 'error': "[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF."}
     
     try:
         with open(path_for_kernel(pdf_path), 'rb') as f:
@@ -1389,13 +1409,200 @@ def _discover_and_verify_pdf(pdf_path: str) -> None:
         with open(path_for_kernel(pubkey_path), 'rb') as f:
             pubkey_pem = f.read()
     except OSError as e:
-        raise ValueError(f"[FAILURE] Failed to read files: {e}")
+        return {'success': False, 'error': f"[FAILURE] Failed to read files: {e}"}
     
     try:
         _verify_detached_signature_bytes(pdf_bytes, sig_bytes, pubkey_pem)
-        print("[SUCCESS] Audit package signature verified")
+        return {'success': True, 'error': None}
     except Exception as e:
-        raise ValueError(f"[FAILURE] Signature verification failed: {e}")
+        return {'success': False, 'error': f"[FAILURE] Signature verification failed: {e}"}
+
+
+def _verify_sealed_dataset(dataset_path: str) -> dict:
+    """Verify a sealed dataset by finding and validating its receipt.
+    
+    Args:
+        dataset_path: Path to directory containing manifest.json and .f33-receipt
+    
+    Returns:
+        dict: {'success': bool, 'error': str | None}
+    """
+    try:
+        from receipt_core import verify_receipt
+    except ImportError:
+        return {'success': False, 'error': "[FAILURE] receipt_core module not available"}
+    
+    # Look for .f33-receipt file in the directory
+    receipt_path = None
+    try:
+        for file in os.listdir(path_for_kernel(dataset_path)):
+            if file.endswith('.f33-receipt'):
+                receipt_path = os.path.join(dataset_path, file)
+                break
+    except OSError as e:
+        return {'success': False, 'error': f"[FAILURE] Failed to read directory: {e}"}
+    
+    if not receipt_path:
+        return {'success': False, 'error': "[FAILURE] No receipt file (.f33-receipt) found in dataset directory"}
+    
+    try:
+        success = verify_receipt(receipt_path, dataset_path)
+        return {'success': success, 'error': None}
+    except Exception as e:
+        return {'success': False, 'error': f"[FAILURE] Receipt verification failed: {e}"}
+
+
+def _verify_pdf_package(package: dict) -> dict:
+    """Verify a PDF audit package for batch mode.
+    
+    Args:
+        package: dict with 'path' key
+    
+    Returns:
+        dict: {'success': bool, 'error': str | None}
+    """
+    return _discover_and_verify_pdf(package['path'])
+
+
+def _verify_zip_package(package: dict) -> dict:
+    """Verify a ZIP audit package for batch mode.
+    
+    Args:
+        package: dict with 'path' key
+    
+    Returns:
+        dict: {'success': bool, 'error': str | None}
+    """
+    return _extract_and_verify_zip(package['path'])
+
+
+def _verify_sealed_package(package: dict, args) -> dict:
+    """Verify a sealed dataset package for batch mode.
+    
+    Args:
+        package: dict with 'path' key
+        args: CLI arguments (unused but for consistency)
+    
+    Returns:
+        dict: {'success': bool, 'error': str | None}
+    """
+    return _verify_sealed_dataset(package['path'])
+
+
+def _verify_batch_directory(directory: str, args) -> int:
+    """Verify all audit packages in a directory with concurrent processing.
+    
+    Args:
+        directory: Path to directory containing audit packages
+        args: CLI arguments
+    
+    Returns:
+        int: Exit code (EXIT_OK if all pass, EXIT_DRIFT if any fail)
+    """
+    import concurrent.futures
+    
+    # Discover audit packages
+    audit_packages = []
+    for root, dirs, files in os.walk(directory):
+        # Standalone PDF files
+        for file in files:
+            if file.lower().endswith('.pdf'):
+                audit_packages.append({'type': 'pdf', 'path': os.path.join(root, file)})
+            elif file.lower().endswith('.zip'):
+                audit_packages.append({'type': 'zip', 'path': os.path.join(root, file)})
+        # Directories with fors33-manifest.json or manifest.json (sealed datasets)
+        if 'fors33-manifest.json' in files or 'manifest.json' in files:
+            audit_packages.append({'type': 'sealed', 'path': root})
+    
+    with print_lock:
+        print(f"[BATCH VERIFY] Scanning directory: {directory}")
+        print(f"[BATCH VERIFY] Found {len(audit_packages)} audit packages")
+    
+    if not audit_packages:
+        with print_lock:
+            print("[BATCH VERIFY] No audit packages found")
+        return EXIT_OK
+    
+    # Hardware-limited concurrency
+    worker_count = resolve_manifest_worker_count(args.workers)
+    with print_lock:
+        print(f"[BATCH VERIFY] Using {worker_count} workers for concurrent processing")
+    
+    results = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_package = {}
+        for package in audit_packages:
+            if package['type'] == 'pdf':
+                future = executor.submit(_verify_pdf_package, package)
+            elif package['type'] == 'zip':
+                future = executor.submit(_verify_zip_package, package)
+            elif package['type'] == 'sealed':
+                future = executor.submit(_verify_sealed_package, package, args)
+            future_to_package[future] = package
+        
+        # Reap futures as they complete
+        for future in concurrent.futures.as_completed(future_to_package):
+            package = future_to_package[future]
+            try:
+                result_dict = future.result()
+                results.append(BatchVerificationResult(
+                    file_path=package['path'],
+                    package_type=package['type'],
+                    status='SUCCESS' if result_dict['success'] else 'ERROR',
+                    error_message=result_dict.get('error')
+                ))
+                with print_lock:
+                    if result_dict['success']:
+                        print(f"[BATCH VERIFY] {os.path.basename(package['path'])}: PASS")
+                    else:
+                        print(f"[BATCH VERIFY] {os.path.basename(package['path'])}: FAIL - {result_dict.get('error', 'Unknown error')}")
+            except Exception as exc:
+                results.append(BatchVerificationResult(
+                    file_path=package['path'],
+                    package_type=package['type'],
+                    status='ERROR',
+                    error_message=str(exc)
+                ))
+                with print_lock:
+                    print(f"[BATCH VERIFY] {os.path.basename(package['path'])}: ERROR - {str(exc)}")
+    
+    # Generate summary
+    passed = sum(1 for r in results if r.status == 'SUCCESS')
+    failed = sum(1 for r in results if r.status == 'ERROR')
+    
+    if args.json:
+        # JSON output
+        summary = {
+            "total_packages": len(results),
+            "passed": passed,
+            "failed": failed,
+            "results": [
+                {
+                    "path": r.file_path,
+                    "type": r.package_type,
+                    "status": r.status,
+                    "error": r.error_message
+                }
+                for r in results
+            ]
+        }
+        print(json.dumps(summary, indent=2))
+    else:
+        # Text output
+        print()
+        print("[BATCH VERIFY SUMMARY]")
+        print(f"[BATCH VERIFY] Total packages: {len(results)}")
+        print(f"[BATCH VERIFY] Passed: {passed}")
+        print(f"[BATCH VERIFY] Failed: {failed}")
+        
+        if failed > 0:
+            print()
+            print("[BATCH VERIFY] Failed packages:")
+            for r in results:
+                if r.status == 'ERROR':
+                    print(f"[BATCH VERIFY]   {os.path.basename(r.file_path)}: {r.error_message}")
+    
+    return EXIT_OK if failed == 0 else EXIT_DRIFT
 
 
 def main() -> int:
@@ -1514,6 +1721,15 @@ def main() -> int:
         "--sig",
         help="Path to detached signature file (.sig) for audit package verification.",
     )
+    parser.add_argument(
+        "--directory",
+        help="Directory containing multiple audit packages for batch verification mode.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit batch verification summary in JSON format (separate from --format used by manifest/sidecars modes).",
+    )
     args = parser.parse_args()
 
     # Environment overrides (FORS33_*)
@@ -1558,6 +1774,14 @@ def main() -> int:
             print(f"[ERROR] F33_KEY_REGISTRY_PATH is not readable: {e}", file=sys.stderr)
             return EXIT_USAGE
 
+    # Mutual exclusivity checks for batch mode
+    if args.directory and args.file:
+        print("[ERROR] --directory and --file cannot be used together", file=sys.stderr)
+        return EXIT_USAGE
+    if args.directory and args.mode in ("manifest", "sidecars"):
+        print("[ERROR] --directory cannot be used with --mode manifest or --mode sidecars", file=sys.stderr)
+        return EXIT_USAGE
+
     # Handle standalone receipt verification
     if args.verify_receipt:
         if not target_dir:
@@ -1593,19 +1817,25 @@ def main() -> int:
     # Smart routing: if --file ends in .zip or .pdf AND no expected hash is provided, route to audit package
     if args.file and not args.expected_hash and not args.record:
         if args.file.lower().endswith('.zip'):
-            try:
-                _extract_and_verify_zip(args.file)
+            result = _extract_and_verify_zip(args.file)
+            if result['success']:
+                print("[SUCCESS] Audit package signature verified")
                 return EXIT_OK
-            except Exception as e:
-                print(f"[ERROR] Audit package verification failed: {e}", file=sys.stderr)
+            else:
+                print(f"[ERROR] Audit package verification failed: {result['error']}", file=sys.stderr)
                 return EXIT_SEVERE
         elif args.file.lower().endswith('.pdf'):
-            try:
-                _discover_and_verify_pdf(args.file)
+            result = _discover_and_verify_pdf(args.file)
+            if result['success']:
+                print("[SUCCESS] Audit package signature verified")
                 return EXIT_OK
-            except Exception as e:
-                print(f"[ERROR] Audit package verification failed: {e}", file=sys.stderr)
+            else:
+                print(f"[ERROR] Audit package verification failed: {result['error']}", file=sys.stderr)
                 return EXIT_SEVERE
+
+    # Batch verification mode
+    if args.directory:
+        return _verify_batch_directory(args.directory, args)
 
     # Legacy single-file sidecar verification path (backwards compatible).
     if args.mode == "single" and args.sidecar:

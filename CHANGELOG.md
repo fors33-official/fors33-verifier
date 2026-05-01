@@ -2,6 +2,30 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.8.0] - 2026-05-01
+
+### Added
+
+- **Batch verification mode**: `--directory` flag for verifying multiple audit packages (PDF, ZIP, sealed datasets) in a single command.
+- **Concurrent processing**: Hardware-limited ThreadPoolExecutor using existing `default_dpk_worker_count()` infrastructure for efficient batch verification.
+- **Mixed package type support**: Automatic detection and verification of PDF audit packages, ZIP audit packages, and sealed datasets (directories with `fors33-manifest.json` or `manifest.json`) in batch mode.
+- **JSON output for batch mode**: `--json` flag to emit structured JSON summary of batch verification results for CI/CD integration.
+- **Sealed dataset verification**: Support for verifying sealed datasets via `.f33-receipt` files in batch mode.
+- **Thread-safe result tracking**: `BatchVerificationResult` dataclass and `print_lock` for concurrent verification with serialized console output.
+
+### Changed
+
+- **Refactored verification functions**: `_extract_and_verify_zip` and `_discover_and_verify_pdf` now return success/error dicts instead of raising exceptions for thread-safe batch processing.
+- **Smart routing updated**: Single-file audit package routing now uses refactored functions that return status dicts.
+- **Backward compatibility**: All existing verification modes (`--mode manifest`, `--mode sidecars`, `--verify-receipt`, `--audit-package`, `--file` smart routing) fully preserved.
+- **Mutual exclusivity enforcement**: `--directory` cannot be used with `--file` or `--mode manifest/sidecars` to prevent ambiguous execution states.
+
+### Security
+
+- **Thread-safe stdout serialization**: Lock-protected print statements prevent interleaved output during concurrent verification.
+- **Isolated verification**: Each package processed independently with no cross-contamination between concurrent verifications.
+- **Exit code semantics**: Returns EXIT_OK (0) if all packages pass, EXIT_DRIFT (1) if any package fails, enabling reliable automation.
+
 ## [0.7.0] - 2026-04-28
 
 ### Added
