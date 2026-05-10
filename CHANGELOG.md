@@ -2,6 +2,13 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.9.1] - 2026-05-10
+
+### Added
+
+- **Manifest backward-compatibility knobs** (kwargs on `verify_directory_from_manifest` / `execute_verification`): `manifest_compromise_action` (`fail_fast` default vs `record_and_continue`), `created_paths_format` (`extension` vs `stripped_filtered`), `manifest_modified_include_reason`, `lineage_broken_maps_to_severe_exit`; shorthand **`legacy_manifest_json=True`** or **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** applies the pre-0.9.0-style bundle together; CLI **`--legacy-manifest-json`** is a thin wrapper.
+- **`ManifestCompromisedError`**: Optional **`rel`**, **`expected_digest`**, **`sidecar_digest`** keyword attributes for tooling that inspected the pre-0.9.0 exception shape (still raises by default).
+
 ## [0.9.0] - 2026-05-10
 
 ### Added
@@ -11,13 +18,13 @@ All notable changes to fors33-verifier are documented here.
 ### Changed
 
 - **Manifest verification worker** aligned with the Docker extension backend: sidecar path resolves as `dirname(target)/basename(target).f33`; hashes the **predicate byte range** (`digest_algo`, `range_start` / `range_end`); compares **computed vs sidecar digest** before **sidecar vs manifest**; `modified[]` rows omit ad-hoc **`reason`** keys in favor of extension-style **`status`** strings.
-- **`ManifestCompromisedError`**: Raised when the signed sidecar disagrees with the manifest digest **after** cooperative thread-pool shutdown (**fail-fast**, no partial continuation with a synthetic `modified` row). Subclasses **`RuntimeError`** without extra fields.
+- **`ManifestCompromisedError`**: Raised when the signed sidecar disagrees with the manifest digest **after** cooperative thread-pool shutdown (**fail-fast** by default; optional **record-and-continue** in 0.9.1). Carries optional **`rel`**, **`expected_digest`**, **`sidecar_digest`** for tooling.
 - **`created[]` paths**: Multi-root drift uses **verbatim** `live_paths` keys (for example `0:relative/path`) to match extension JSON.
 - **`VerificationReport`** / CLI JSON: **`files_scanned`** echoes extension semantics (residual `live_paths` length after manifest pops, typically aligned with created drift count); **`lineage`** summary included when using `execute_verification` / `--format json`.
 
 ### Compatibility
 
-- Automation that relied on catching **`ManifestCompromisedError.rel`** or on receiving a **completed** JSON payload while listing manifest compromise under `modified` must be updated for the fail-fast path.
+- Automation that relied on catching **`ManifestCompromisedError`** fields or on a **completed** JSON payload with manifest compromise under `modified` may use **0.9.1** opt-in kwargs, **`--legacy-manifest-json`**, or **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** (defaults remain fail-fast for extension parity).
 
 ## [0.8.1] - 2026-05-10
 

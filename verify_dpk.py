@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Literal, Optional, Sequence
 
 try:  # Support both package and flat-module imports
     from .hash_core import (  # type: ignore[import]
@@ -591,6 +591,38 @@ def _verify_lineage_json_against_manifest(
 class ManifestCompromisedError(RuntimeError):
     """Raised when the central manifest and signature-verified sidecars disagree."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        rel: str | None = None,
+        expected_digest: str | None = None,
+        sidecar_digest: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.rel = rel
+        self.expected_digest = expected_digest
+        self.sidecar_digest = sidecar_digest
+
+
+def _resolve_manifest_verify_compat_kwargs(
+    *,
+    legacy_manifest_json: bool,
+    manifest_compromise_action: Literal["fail_fast", "record_and_continue"],
+    created_paths_format: Literal["extension", "stripped_filtered"],
+    manifest_modified_include_reason: bool,
+    lineage_broken_maps_to_severe_exit: bool,
+) -> tuple[Literal["fail_fast", "record_and_continue"], Literal["extension", "stripped_filtered"], bool, bool]:
+    """Apply ``FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`` or ``legacy_manifest_json=True`` OSS 0.8.x-style presets."""
+    if legacy_manifest_json or _env_bool("FORS33_VERIFIER_LEGACY_MANIFEST_JSON"):
+        return ("record_and_continue", "stripped_filtered", True, False)
+    return (
+        manifest_compromise_action,
+        created_paths_format,
+        manifest_modified_include_reason,
+        lineage_broken_maps_to_severe_exit,
+    )
+
 
 @dataclass
 class VerificationReport:
@@ -608,6 +640,7 @@ class VerificationReport:
     timing: dict
     files_scanned: int = 0
     lineage: dict | None = None
+    lineage_broken_maps_to_severe_exit: bool = True
 
 
 def _strip_mount_prefix(path: str, prefix: str) -> str:
@@ -1384,6 +1417,12 @@ def verify_directory_from_manifest(
     strip_mount_prefix: str = "",
     verify_tsa: bool = False,
     max_workers: Optional[int] = None,
+    *,
+    legacy_manifest_json: bool = False,
+    manifest_compromise_action: Literal["fail_fast", "record_and_continue"] = "fail_fast",
+    created_paths_format: Literal["extension", "stripped_filtered"] = "extension",
+    manifest_modified_include_reason: bool = False,
+    lineage_broken_maps_to_severe_exit: bool = True,
 ) -> dict:
     """
     Verify a directory tree against a manifest.
@@ -1393,8 +1432,28 @@ def verify_directory_from_manifest(
       - modified, created, deleted, mutated_during_verification, skipped
       - files_scanned, lineage (manifest lineage.json summary when applicable)
       - algo_stats, timing
+      - lineage_broken_maps_to_severe_exit (for CLI/embedders setting exit policy)
+
+    Compatibility (kwargs are source of truth; ``--legacy-manifest-json`` and
+    ``FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`` set the pre-0.9.0-style bundle):
+      - ``manifest_compromise_action="record_and_continue"``: append compromise to
+        ``modified`` and continue instead of failing fast (weaker audit posture).
+      - ``created_paths_format="stripped_filtered"``: normalize ``created[].path``
+        for multi-root (strip ``root_idx:`` prefix; skip cryptographic artifacts).
+      - ``manifest_modified_include_reason=True``: add redundant ``reason`` on
+        ``modified`` rows where useful (pre-0.9.0 JSON shape).
+      - ``lineage_broken_maps_to_severe_exit=False``: callers/CLI should not map
+        broken lineage alone to severe exit (drift-only line).
     """
     import fnmatch
+
+    compromise_action, created_fmt, mod_inc_reason, lineage_severe = _resolve_manifest_verify_compat_kwargs(
+        legacy_manifest_json=legacy_manifest_json,
+        manifest_compromise_action=manifest_compromise_action,
+        created_paths_format=created_paths_format,
+        manifest_modified_include_reason=manifest_modified_include_reason,
+        lineage_broken_maps_to_severe_exit=lineage_broken_maps_to_severe_exit,
+    )
 
     start_ts = datetime.now(timezone.utc)
     start_monotonic = start_ts.timestamp()
@@ -1642,7 +1701,12 @@ def verify_directory_from_manifest(
         expected_l = str(expected or "").lower()
         if sidecar_digest_l != expected_l:
             _abort_event.set()
-            raise ManifestCompromisedError(_ERR_MANIFEST_COMPROMISED)
+            raise ManifestCompromisedError(
+                _ERR_MANIFEST_COMPROMISED,
+                rel=rel,
+                expected_digest=str(expected or ""),
+                sidecar_digest=sidecar_digest_l,
+            )
 
         return ("ok", work_key, rel, algo, expected, None, None, None)
 
@@ -1655,15 +1719,17 @@ def verify_directory_from_manifest(
         ):
             work_key = wk
             if kind == "modified":
-                modified.append(
-                    {
-                        "path": rel,
-                        "digest": computed,
-                        "expected_digest": expected,
-                        "algo": algo,
-                        "status": status or "modified",
-                    }
-                )
+                mrow = {
+                    "path": rel,
+                    "digest": computed,
+                    "expected_digest": expected,
+                    "algo": algo,
+                    "status": status or "modified",
+                }
+                if mod_inc_reason:
+                    st = status or "modified"
+                    mrow["reason"] = err if err is not None else st
+                modified.append(mrow)
             elif kind == "mutated":
                 mutated.append(
                     {
@@ -1684,11 +1750,26 @@ def verify_directory_from_manifest(
                     }
                 )
             live_paths.pop(work_key, None)
-    except ManifestCompromisedError:
+    except ManifestCompromisedError as e:
         aborted = True
         _abort_event.set()
         executor.shutdown(wait=False, cancel_futures=True)
-        raise
+        if compromise_action == "record_and_continue":
+            for k in list(live_paths.keys()):
+                rel_only = k.split(":", 1)[1] if ":" in k and k[0].isdigit() else k
+                if rel_only == (e.rel or ""):
+                    live_paths.pop(k, None)
+            crow = {
+                "path": e.rel or "",
+                "expected_digest": e.expected_digest,
+                "digest": e.sidecar_digest,
+                "status": _ERR_MANIFEST_COMPROMISED,
+            }
+            if mod_inc_reason:
+                crow["reason"] = _ERR_MANIFEST_COMPROMISED
+            modified.append(crow)
+        else:
+            raise
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         sys.exit(130)
@@ -1696,9 +1777,16 @@ def verify_directory_from_manifest(
         if not aborted:
             executor.shutdown(wait=True)
 
-    # Remaining live paths that were not in manifest are "created" (extension uses dict keys verbatim).
+    # Remaining live_paths keys are "created" drift (extension: verbatim keys; legacy: stripped + filtered).
     for norm_rel in sorted(live_paths.keys()):
-        created.append({"path": norm_rel, "status": "created"})
+        if created_fmt == "stripped_filtered":
+            rel_only = norm_rel.split(":", 1)[1] if ":" in norm_rel and norm_rel[0].isdigit() else norm_rel
+            rl = rel_only.lower()
+            if rl.endswith(".f33") or rl.endswith("/fors33-manifest.json") or rl == "fors33-manifest.json":
+                continue
+            created.append({"path": rel_only, "status": "created"})
+        else:
+            created.append({"path": norm_rel, "status": "created"})
 
     lineage_summary, lineage_extra = _verify_lineage_json_against_manifest(
         manifest_path,
@@ -1734,6 +1822,7 @@ def verify_directory_from_manifest(
         # Mirrors extension semantics: residual live_paths keys after manifest pops (often "created" count).
         "files_scanned": len(live_paths),
         "lineage": lineage_summary,
+        "lineage_broken_maps_to_severe_exit": lineage_severe,
     }
     return result
 
@@ -1750,12 +1839,20 @@ def execute_verification(
     strip_mount_prefix: str = "",
     verify_tsa: bool = False,
     max_workers: Optional[int] = None,
+    *,
+    legacy_manifest_json: bool = False,
+    manifest_compromise_action: Literal["fail_fast", "record_and_continue"] = "fail_fast",
+    created_paths_format: Literal["extension", "stripped_filtered"] = "extension",
+    manifest_modified_include_reason: bool = False,
+    lineage_broken_maps_to_severe_exit: bool = True,
 ) -> VerificationReport:
     """
     Library entry point: verify directory against manifest.
 
     Returns VerificationReport with modified, created, deleted, skipped, mutated.
     When progress_event_callback is set, emits JSON progress events for headless streaming.
+
+    Compatibility kwargs mirror ``verify_directory_from_manifest``; see that docstring.
     """
     result = verify_directory_from_manifest(
         manifest_path=manifest_path,
@@ -1769,6 +1866,11 @@ def execute_verification(
         strip_mount_prefix=strip_mount_prefix,
         verify_tsa=verify_tsa,
         max_workers=max_workers,
+        legacy_manifest_json=legacy_manifest_json,
+        manifest_compromise_action=manifest_compromise_action,
+        created_paths_format=created_paths_format,
+        manifest_modified_include_reason=manifest_modified_include_reason,
+        lineage_broken_maps_to_severe_exit=lineage_broken_maps_to_severe_exit,
     )
     return VerificationReport(
         modified=result["modified"],
@@ -1783,6 +1885,9 @@ def execute_verification(
         timing=result["timing"],
         files_scanned=int(result.get("files_scanned", 0)),
         lineage=result.get("lineage"),
+        lineage_broken_maps_to_severe_exit=bool(
+            result.get("lineage_broken_maps_to_severe_exit", True)
+        ),
     )
 
 
@@ -2167,6 +2272,15 @@ def main() -> int:
         help="Thread pool size for --mode manifest (default: auto; capped at 64).",
     )
     parser.add_argument(
+        "--legacy-manifest-json",
+        action="store_true",
+        help=(
+            "OSS 0.8.x-style manifest output: record manifest compromise in modified and continue, "
+            "strip created paths, include modified.reason, do not map broken lineage alone to exit 3 "
+            "(same as FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1)."
+        ),
+    )
+    parser.add_argument(
         "--emit-report",
         action="store_true",
         help="Emit a one-line executive summary report.",
@@ -2365,6 +2479,7 @@ def main() -> int:
                 strip_mount_prefix=args.strip_mount_prefix or "",
                 verify_tsa=args.verify_tsa,
                 max_workers=worker_n,
+                legacy_manifest_json=args.legacy_manifest_json,
             )
             result = {
                 "schema_version": report.schema_version,
@@ -2379,6 +2494,7 @@ def main() -> int:
                 "timing": report.timing,
                 "files_scanned": report.files_scanned,
                 "lineage": report.lineage,
+                "lineage_broken_maps_to_severe_exit": report.lineage_broken_maps_to_severe_exit,
             }
         except Exception as e:
             print(f"Manifest verification failed: {e}", file=sys.stderr)
@@ -2432,7 +2548,11 @@ def main() -> int:
         if any(str(m.get("status", "")) in severe_statuses for m in modified):
             exit_code = EXIT_SEVERE
         lin = result.get("lineage")
-        if isinstance(lin, dict) and lin.get("status") == "broken":
+        if (
+            result.get("lineage_broken_maps_to_severe_exit", True)
+            and isinstance(lin, dict)
+            and lin.get("status") == "broken"
+        ):
             exit_code = EXIT_SEVERE
         if args.warn_only:
             return EXIT_OK

@@ -18,9 +18,9 @@ Use the fors33-verifier package. Install with `pip install fors33-verifier`. For
 
 `fors33-verifier --mode manifest --file /path/to/manifest.json --root /path/to/root`. Supports GNU coreutils checksum text, BSD/OpenSSL format, and JSON manifests (including `entries` / `subject` shapes and optional `chain_version` hash chain). Use `--format json` for structured output. `--target-dir` is a deprecated alias for `--root`.
 
-Structured JSON includes **`lineage`** (derived-data `lineage.json` cross-check against manifest `entries`) and **`files_scanned`** (extension-aligned residual live-path metric after manifest membership pops). Broken lineage sets severe exit in addition to drift listing. See [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md) for a scrubbed schema summary.
+Structured JSON includes **`lineage`**, **`files_scanned`**, and **`lineage_broken_maps_to_severe_exit`**. Broken lineage maps to severe CLI exit when that flag is true (default). Optional kwargs, **`legacy_manifest_json`**, **`--legacy-manifest-json`**, or **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** restore pre-0.9.0 JSON and exit behavior. See [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md) for a scrubbed lineage schema.
 
-If the signed sidecar digest disagrees with the manifest row after data-vs-seal checks pass, the library raises **`ManifestCompromisedError`** and manifest-mode verification **stops** (fail-fast after thread-pool shutdown); callers must handle the exception instead of assuming a full JSON body.
+By default, if the signed sidecar digest disagrees with the manifest row after data-vs-seal checks pass, the library raises **`ManifestCompromisedError`** (optional attributes **`rel`**, **`expected_digest`**, **`sidecar_digest`**) and stops unless **`manifest_compromise_action=\"record_and_continue\"`** or the legacy preset is enabled.
 
 Workers: positive `--workers` overrides non-positive `FORS33_WORKERS`; otherwise `default_dpk_worker_count()` with optional `FORS33_DPK_MAX_WORKERS`. `F33_KEY_REGISTRY_PATH` when non-empty must point to a readable operator registry file.
 

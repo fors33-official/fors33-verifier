@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.9.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-0.9.1-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.9.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-0.9.1%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -14,11 +14,15 @@ Standalone verification for attested data segments and general-purpose file inte
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
 
+### 0.9.1 (2026-05-10)
+
+- **Manifest JSON compatibility**: Keyword parameters on **`verify_directory_from_manifest`** / **`execute_verification`**, CLI **`--legacy-manifest-json`**, or env **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** opt into pre-0.9.0-style output (record-and-continue on manifest compromise, stripped **`created[].path`**, **`modified[].reason`**, broken lineage does not force exit 3 alone). Defaults stay extension-parity.
+
 ### 0.9.0 (2026-05-10)
 
-- **Manifest-mode extension parity**: Sidecar path **`dirname(target)/basename(target).f33`**, predicate byte-range hashing, triangle check order (data vs seal vs manifest), **`ManifestCompromisedError` fail-fast** after pool shutdown (no completed JSON with a synthetic compromise row).
+- **Manifest-mode extension parity**: Sidecar path **`dirname(target)/basename(target).f33`**, predicate byte-range hashing, triangle check order (data vs seal vs manifest), **`ManifestCompromisedError` fail-fast by default** after pool shutdown.
 - **`lineage.json`**: After per-file verification, declares upstream digests checked against the same manifest `entries`; structured **`lineage`** object and **`files_scanned`** field in JSON (see [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md)).
-- **`created`** drift paths use multi-root keys verbatim (for example `0:relative/path`), matching extension output.
+- **`created`** drift paths use multi-root keys verbatim (for example `0:relative/path`), matching extension output unless legacy compatibility is enabled (0.9.1).
 
 ### 0.8.1 (2026-05-10)
 
@@ -48,7 +52,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.9.0`) and **`push_latest`**—it does **not** run automatically on git tags.
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.9.1`) and **`push_latest`**—it does **not** run automatically on git tags.
 
 ## Usage
 
@@ -84,7 +88,7 @@ The attestation record JSON must contain `byte_start`, `byte_end`, and `hash`. U
 fors33-verifier --mode manifest --file ./baseline.sha256 --root ./root --format json
 ```
 Use `--root` (or deprecated `--target-dir`) for the directory to verify. MD5/SHA-1 in manifests are rejected by default; use `--force-insecure` for legacy manifests.
-Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emits a structured drift report with `modified`, `created`, `deleted`, `mutated_during_verification`, `skipped`, **`files_scanned`** (extension-style residual live-path metric), and **`lineage`** when **`lineage.json`** rows are present (see [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md)).
+Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emits a structured drift report with `modified`, `created`, `deleted`, `mutated_during_verification`, `skipped`, **`files_scanned`** (extension-style residual live-path metric), and **`lineage`** when **`lineage.json`** rows are present (see [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md)). **`--legacy-manifest-json`** or **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** opts into pre-0.9.0 manifest JSON and exit behavior (see release **0.9.1**).
 
 **Sidecar verification:**
 ```bash
@@ -163,7 +167,7 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.9.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.9.1`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
@@ -187,9 +191,9 @@ The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33/fors33-verifier:0.9.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33/fors33-verifier:0.9.1 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:0.9.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:0.9.1 --file /data/file.csv --expected-hash <sha256>
 ```
 
 Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.
