@@ -56,6 +56,9 @@ _ERR_MANIFEST_COMPROMISED = "[ ERR_MANIFEST_COMPROMISED: Root of trust invalid ]
 _ERR_BAD_SIGNATURE = "[ TAMPER DETECTED: BAD SIGNATURE ]"
 _ERR_DATA_DRIFT = "[ SEAL BROKEN: DATA DRIFT ]"
 _ERR_TSA_INVALID = "[ ERR_INVALID_TSA ]"
+_ERR_SIG_ALG_UNSUPPORTED = "[ SIG_ALG_UNSUPPORTED ]"
+_ERR_SIG_ALG_NOT_IMPLEMENTED = "[ SIG_ALG_NOT_IMPLEMENTED ]"
+_ERR_SIG_X509_CHAIN_INVALID = "[ SIG_X509_CHAIN_INVALID ]"
 
 _EXIT_OK = 0
 EXIT_DRIFT = 1
@@ -148,6 +151,45 @@ def sanitize_seal_metadata_value(value: object, max_len: int = 256) -> str | Non
     return cleaned or None
 
 
+SIGNATURE_INTENT_VALUES = ("Authored", "Reviewed", "Approved")
+REASON_FOR_CHANGE_MAX_LEN = 512
+SIG_ALG_ED25519 = "ed25519"
+SIG_ALG_X509_RSA_PSS_SHA256 = "x509-rsa-pss-sha256"
+SIG_ALG_X509_ECDSA_P256_SHA256 = "x509-ecdsa-p256-sha256"
+SIG_ALG_VALUES = (
+    SIG_ALG_ED25519,
+    SIG_ALG_X509_RSA_PSS_SHA256,
+    SIG_ALG_X509_ECDSA_P256_SHA256,
+)
+
+
+def _validate_sig_alg(value: str | None) -> str:
+    if value is None:
+        return SIG_ALG_ED25519
+    s = str(value).strip().lower()
+    if not s:
+        return SIG_ALG_ED25519
+    for canonical in SIG_ALG_VALUES:
+        if s == canonical.lower():
+            return canonical
+    raise ValueError(f"sig_alg must be one of {SIG_ALG_VALUES}; got {value!r}")
+
+
+def _validate_signature_intent(value: str | None) -> str | None:
+    """Validate FDA 21 CFR 11.50 signature intent; return canonical casing or None."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    for canonical in SIGNATURE_INTENT_VALUES:
+        if s.lower() == canonical.lower():
+            return canonical
+    raise ValueError(
+        f"signature_intent must be one of {SIGNATURE_INTENT_VALUES}; got {value!r}"
+    )
+
+
 def build_canonical_payload(
     target_name: str,
     byte_start: int,
@@ -161,6 +203,10 @@ def build_canonical_payload(
     operator_key_id: str | None = None,
     authorized_operator: str | None = None,
     organization: str | None = None,
+    source_fingerprint: str | None = None,
+    signature_intent: str | None = None,
+    reason_for_change: str | None = None,
+    sig_alg: str | None = None,
 ) -> bytes:
     """Deterministic UTF-8 payload bytes for Ed25519 (V1 four lines or V2 with optional custody lines)."""
     if os.path.sep in target_name:
@@ -211,12 +257,344 @@ def build_canonical_payload(
         lines.append(f"AUTHORIZED_OPERATOR:{seal_utf8_normalize_and_validate('AUTHORIZED_OPERATOR', ao)}")
     if org:
         lines.append(f"ORGANIZATION:{seal_utf8_normalize_and_validate('ORGANIZATION', org)}")
+    if source_fingerprint:
+        sf = seal_utf8_normalize_and_validate("SOURCE_FINGERPRINT", source_fingerprint)
+        lines.append(f"SOURCE_FINGERPRINT:{sf}")
+    intent = _validate_signature_intent(signature_intent)
+    if intent:
+        lines.append(f"SIGNATURE_INTENT:{intent}")
+    if reason_for_change is not None:
+        rfc = sanitize_seal_metadata_value(reason_for_change, max_len=REASON_FOR_CHANGE_MAX_LEN)
+        if rfc:
+            lines.append(
+                "REASON_FOR_CHANGE:"
+                + seal_utf8_normalize_and_validate(
+                    "REASON_FOR_CHANGE", rfc, max_len=REASON_FOR_CHANGE_MAX_LEN
+                )
+            )
+    sig_alg_canonical = _validate_sig_alg(sig_alg)
+    if sig_alg_canonical != SIG_ALG_ED25519:
+        lines.append(f"SIG_ALG:{sig_alg_canonical}")
     return "\n".join(lines).encode("utf-8")
+
+
+def verify_manifest_hmac(manifest_path: str, pepper_bytes: bytes | None) -> tuple[bool, str]:
+    """Verify ``fors33-manifest.hmac`` sidecar when present; legacy absent sidecar is OK."""
+    import hmac as _hmac
+    import hashlib as _hashlib
+
+    sidecar = manifest_path + ".hmac"
+    if not os.path.isfile(path_for_kernel(sidecar)):
+        return True, "absent"
+    try:
+        with open(path_for_kernel(sidecar), "rb") as f:
+            raw = f.read()
+        rec = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        return False, f"manifest_hmac_failed:malformed:{e}"
+    if not isinstance(rec, dict):
+        return False, "manifest_hmac_failed:not_a_dict"
+    expected_hex = str(rec.get("hmac_hex") or "").strip().lower()
+    if not expected_hex:
+        return False, "manifest_hmac_failed:missing_hmac_hex"
+    if pepper_bytes is None:
+        return False, "manifest_hmac_failed:no_pepper"
+    try:
+        with open(path_for_kernel(manifest_path), "rb") as mfp:
+            manifest_bytes = mfp.read()
+    except OSError as e:
+        return False, f"manifest_hmac_failed:read_manifest:{e}"
+    actual_hex = _hmac.new(pepper_bytes, manifest_bytes, _hashlib.sha256).hexdigest()
+    if not _hmac.compare_digest(actual_hex, expected_hex):
+        return False, "manifest_hmac_failed:mismatch"
+    return True, "verified"
+
+
+# --- lineage.json (derived-data provenance; schema v1.0, see docs if published) ---
+
+
+def _normalize_manifest_entry_path(file_path: str, fallback_root_dir: str | None) -> str:
+    """Match manifest_core path normalization for manifest entries."""
+    p = str(file_path)
+    if fallback_root_dir and os.path.isabs(p):
+        try:
+            return os.path.relpath(p, os.path.abspath(fallback_root_dir)).replace("\\", "/")
+        except Exception:
+            return p.replace("\\", "/")
+    return p.replace("\\", "/")
+
+
+def _iter_trusted_manifest_segments(manifest_path: str, fallback_root_dir: str) -> List[dict]:
+    """Load fors33-manifest.json entries as trust rows for lineage cross-check."""
+    rows: List[dict] = []
+    try:
+        with open(path_for_kernel(manifest_path), encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return rows
+    if not isinstance(raw, dict):
+        return rows
+    entries = raw.get("entries")
+    if not isinstance(entries, list):
+        return rows
+    root_abs = os.path.abspath(fallback_root_dir)
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        fp = item.get("path")
+        if not fp:
+            continue
+        dg = item.get("sha256") or item.get("sha512")
+        if not dg:
+            continue
+        ha = str(item.get("hash_algo") or ("sha512" if item.get("sha512") else "sha256")).lower()
+        if ha not in ("sha256", "sha512"):
+            ha = "sha256"
+        try:
+            ri = int(item.get("root_index", 0) or 0)
+        except (TypeError, ValueError):
+            ri = 0
+        try:
+            bs_i = int(item.get("byte_start", 0) or 0)
+            be_i = int(item.get("byte_end", 0) or 0)
+        except (TypeError, ValueError):
+            bs_i, be_i = 0, 0
+        rows.append(
+            {
+                "path_norm": _normalize_manifest_entry_path(str(fp), root_abs),
+                "digest": str(dg).lower().strip(),
+                "algo": ha,
+                "byte_start": bs_i,
+                "byte_end": be_i,
+                "root_index": ri,
+            }
+        )
+    return rows
+
+
+def _lineage_declared_path_norm(declared: str) -> str | None:
+    s = declared.strip().replace("\\", "/")
+    if not s or s.startswith("/"):
+        return None
+    parts = [p for p in s.split("/") if p]
+    if any(p == ".." for p in parts):
+        return None
+    return "/".join(parts)
+
+
+def _lineage_input_matches_trusted(trusted: Sequence[dict], inp: object) -> tuple[bool, str]:
+    if not isinstance(inp, dict):
+        return False, "input entry must be an object"
+    path_norm = _lineage_declared_path_norm(str(inp.get("path") or ""))
+    if path_norm is None:
+        return False, "invalid or unsafe path"
+    alg = str(inp.get("digest_alg") or "").lower().strip()
+    if alg not in ("sha256", "sha512"):
+        return False, "digest_alg must be sha256 or sha512"
+    dg = str(inp.get("digest_hex") or "").lower().strip()
+    if alg == "sha256":
+        if len(dg) != 64 or any(c not in "0123456789abcdef" for c in dg):
+            return False, "digest_hex must be 64 lowercase hex chars for sha256"
+    elif len(dg) != 128 or any(c not in "0123456789abcdef" for c in dg):
+        return False, "digest_hex must be 128 lowercase hex chars for sha512"
+
+    bs_raw = inp.get("byte_start", None)
+    be_raw = inp.get("byte_end", None)
+    has_range = bs_raw is not None or be_raw is not None
+    if has_range:
+        if bs_raw is None or be_raw is None:
+            return False, "byte_start and byte_end must both be set when either is present"
+        try:
+            bs_i = int(bs_raw)
+            be_i = int(be_raw)
+        except (TypeError, ValueError):
+            return False, "byte_start and byte_end must be integers"
+        if be_i <= bs_i:
+            return False, "byte_end must be greater than byte_start"
+    else:
+        bs_i = be_i = None
+
+    for row in trusted:
+        if row["path_norm"] != path_norm:
+            continue
+        if row["digest"] != dg:
+            continue
+        if row["algo"] != alg:
+            continue
+        if has_range:
+            if row["byte_start"] == bs_i and row["byte_end"] == be_i:
+                return True, ""
+        else:
+            return True, ""
+
+    if has_range:
+        return False, "no trusted manifest row matches path, digest, and byte range"
+    return False, "no trusted manifest row matches path and digest"
+
+
+def _parse_lineage_document(data: object) -> tuple[dict | None, str]:
+    if not isinstance(data, dict):
+        return None, "lineage.json root must be a JSON object"
+    if data.get("schema_version") != "1.0":
+        return None, 'schema_version must be "1.0"'
+    deriv = data.get("derivation_id")
+    if not isinstance(deriv, str) or not deriv.strip():
+        return None, "derivation_id must be a non-empty string"
+    deriv_s = deriv.strip()
+    if len(deriv_s) > 256:
+        return None, "derivation_id exceeds 256 characters"
+    if any(ord(c) < 32 for c in deriv_s):
+        return None, "derivation_id must not contain control characters"
+    inputs = data.get("inputs")
+    if not isinstance(inputs, list):
+        return None, "inputs must be a JSON array"
+    return {"schema_version": "1.0", "derivation_id": deriv_s, "inputs": inputs}, ""
+
+
+def _resolve_lineage_file_path(path_norm: str, roots_resolved: Sequence[str]) -> str | None:
+    rel = path_norm.replace("/", os.sep)
+    for r in roots_resolved:
+        cand = os.path.join(os.path.abspath(r), rel)
+        try:
+            k = path_for_kernel(cand)
+            if os.path.isfile(k):
+                return k
+        except OSError:
+            continue
+    return None
+
+
+def _verify_lineage_json_against_manifest(
+    manifest_path: str,
+    roots_resolved: Sequence[str],
+    modified: List[dict],
+    deleted: List[dict],
+) -> tuple[dict, List[dict]]:
+    """
+    After per-file .f33 verification, validate lineage.json semantics against the same manifest.
+
+    Returns (lineage_summary_dict, extra_modified_rows for drift UI).
+    """
+    primary_root = os.path.abspath(roots_resolved[0] if roots_resolved else os.getcwd())
+    trusted = _iter_trusted_manifest_segments(manifest_path, primary_root)
+    modified_paths = {str(m.get("path") or "").replace("\\", "/") for m in modified}
+    deleted_paths = {str(d.get("path") or "").replace("\\", "/") for d in deleted}
+
+    lineage_targets: dict[tuple[int, str], None] = {}
+    for row in trusted:
+        pn = row["path_norm"]
+        if os.path.basename(pn) != "lineage.json":
+            continue
+        lineage_targets[(int(row.get("root_index", 0)), pn)] = None
+
+    reports: List[dict] = []
+    extra_modified: List[dict] = []
+
+    for _ri, path_norm in sorted(lineage_targets.keys(), key=lambda x: (x[1], x[0])):
+        entry_report: dict = {"path": path_norm, "derivation_id": None, "inputs_checked": 0, "ok": True, "errors": []}
+
+        if path_norm in modified_paths:
+            entry_report["ok"] = False
+            entry_report["errors"].append("lineage skipped: file failed cryptographic verification earlier in this run")
+            reports.append(entry_report)
+            continue
+        if path_norm in deleted_paths:
+            entry_report["ok"] = False
+            entry_report["errors"].append("lineage skipped: file marked deleted relative to manifest")
+            reports.append(entry_report)
+            continue
+
+        full_path = _resolve_lineage_file_path(path_norm, roots_resolved)
+        if not full_path:
+            entry_report["ok"] = False
+            entry_report["errors"].append("lineage.json not found on disk under verify roots")
+            extra_modified.append(
+                {
+                    "path": path_norm,
+                    "digest": None,
+                    "expected_digest": None,
+                    "algo": "sha256",
+                    "status": "[ LINEAGE BROKEN: missing lineage.json on disk ]",
+                }
+            )
+            reports.append(entry_report)
+            continue
+
+        try:
+            with open(full_path, encoding="utf-8") as lf:
+                doc = json.load(lf)
+        except (OSError, json.JSONDecodeError) as e:
+            entry_report["ok"] = False
+            entry_report["errors"].append(f"invalid lineage.json: {e}")
+            extra_modified.append(
+                {
+                    "path": path_norm,
+                    "digest": None,
+                    "expected_digest": None,
+                    "algo": "sha256",
+                    "status": "[ LINEAGE BROKEN: invalid JSON ]",
+                }
+            )
+            reports.append(entry_report)
+            continue
+
+        parsed, perr = _parse_lineage_document(doc)
+        if parsed is None:
+            entry_report["ok"] = False
+            entry_report["errors"].append(perr)
+            extra_modified.append(
+                {
+                    "path": path_norm,
+                    "digest": None,
+                    "expected_digest": None,
+                    "algo": "sha256",
+                    "status": f"[ LINEAGE BROKEN: {perr} ]",
+                }
+            )
+            reports.append(entry_report)
+            continue
+
+        entry_report["derivation_id"] = parsed["derivation_id"]
+        inputs_list: List[object] = parsed["inputs"]
+        entry_report["inputs_checked"] = len(inputs_list)
+
+        input_errs: List[str] = []
+        for idx, inp in enumerate(inputs_list):
+            ok, msg = _lineage_input_matches_trusted(trusted, inp)
+            if not ok:
+                input_errs.append(f"inputs[{idx}]: {msg}")
+        if input_errs:
+            entry_report["ok"] = False
+            entry_report["errors"].extend(input_errs)
+            extra_modified.append(
+                {
+                    "path": path_norm,
+                    "digest": None,
+                    "expected_digest": None,
+                    "algo": "sha256",
+                    "status": "[ LINEAGE BROKEN: upstream digest not found in trusted manifest ]",
+                    "lineage_errors": input_errs,
+                }
+            )
+
+        reports.append(entry_report)
+
+    broken = any(not r.get("ok", False) for r in reports)
+    summary = {
+        "status": "broken" if broken else "ok",
+        "files_checked": len(reports),
+        "reports": reports,
+    }
+    return summary, extra_modified
+
+
+class ManifestCompromisedError(RuntimeError):
+    """Raised when the central manifest and signature-verified sidecars disagree."""
 
 
 @dataclass
 class VerificationReport:
-    """Unified report for Data Latch UI: modified, created, deleted, skipped, mutated."""
+    """Unified report for L3dgr-style consumers: modified, created, deleted, skipped, mutated."""
 
     modified: List[dict]
     created: List[dict]
@@ -228,6 +606,8 @@ class VerificationReport:
     root: str
     roots: List[str] | None
     timing: dict
+    files_scanned: int = 0
+    lineage: dict | None = None
 
 
 def _strip_mount_prefix(path: str, prefix: str) -> str:
@@ -276,16 +656,6 @@ _IN_TOTO_STATEMENT_V0_1 = "https://in-toto.io/Statement/v0.1"
 _IN_TOTO_STATEMENT_V1 = "https://in-toto.io/Statement/v1"
 
 
-class ManifestCompromisedError(RuntimeError):
-    """Raised when a signed sidecar disagrees with manifest digest."""
-
-    def __init__(self, rel: str, expected_digest: str, sidecar_digest: str) -> None:
-        super().__init__(_ERR_MANIFEST_COMPROMISED)
-        self.rel = rel
-        self.expected_digest = expected_digest
-        self.sidecar_digest = sidecar_digest
-
-
 def _f33_validate_subject_digest(sub: dict, index: int) -> None:
     """Ensure subject[index] has a digest object with valid sha256 or sha512 hex."""
     digest = sub.get("digest")
@@ -312,6 +682,8 @@ def _parse_f33(sidecar_path: str) -> dict:
     try:
         with open(path_for_kernel(sidecar_path), encoding="utf-8") as f:
             statement = json.load(f)
+    except FileNotFoundError:
+        raise
     except json.JSONDecodeError as e:
         raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} non-json sidecar: {e}") from e
     except OSError as e:
@@ -468,6 +840,13 @@ def _parse_f33(sidecar_path: str) -> dict:
     if len(signature_hex_l) != 128 or any(c not in "0123456789abcdef" for c in signature_hex_l):
         raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} predicate.signature_hex must be 128 hex chars")
 
+    meta = predicate.get("metadata") if isinstance(predicate.get("metadata"), dict) else {}
+    raw_ts = meta.get("time_source", "PAYLOAD_NATIVE")
+    if isinstance(raw_ts, str) and raw_ts.strip() in ("PAYLOAD_NATIVE", "LOCAL_CONTAINER", "HARDWARE_PTP"):
+        time_source = raw_ts.strip()
+    else:
+        time_source = "PAYLOAD_NATIVE"
+
     return {
         "target": target_name,
         "range_start": byte_start,
@@ -485,10 +864,15 @@ def _parse_f33(sidecar_path: str) -> dict:
         "authorized_operator": _pred_opt_str(predicate, "authorized_operator"),
         "organization": _pred_opt_str(predicate, "organization"),
         "source_fingerprint": _pred_opt_str(predicate, "source_fingerprint"),
+        "signature_intent": _pred_opt_str(predicate, "signature_intent"),
+        "reason_for_change": _pred_opt_str(predicate, "reason_for_change"),
+        "sig_alg": _pred_opt_str(predicate, "sig_alg"),
+        "nonce_hex": _pred_opt_str(predicate, "nonce_hex"),
         "tsa_public_key_hex": tsa_public_key_hex_l,
         "tsa_signature_hex": tsa_signature_hex_l,
         "rfc3161_token_b64": rfc3161_b64,
         "tsa": predicate.get("tsa") if isinstance(predicate.get("tsa"), dict) else None,
+        "time_source": time_source,
     }
 
 
@@ -521,7 +905,21 @@ def _build_payload_for_version(parsed: dict, payload_version: int) -> bytes:
         operator_key_id=okid,
         authorized_operator=parsed.get("authorized_operator"),
         organization=parsed.get("organization"),
+        source_fingerprint=parsed.get("source_fingerprint"),
+        signature_intent=parsed.get("signature_intent"),
+        reason_for_change=parsed.get("reason_for_change"),
+        sig_alg=parsed.get("sig_alg"),
     )
+
+
+def _verify_signature_pick_payload(parsed: dict) -> bytes:
+    """Dispatch signature verification by optional ``sig_alg`` (Wave 3B)."""
+    sig_alg_raw = str(parsed.get("sig_alg") or "").strip().lower()
+    if not sig_alg_raw or sig_alg_raw == "ed25519":
+        return _verify_ed25519_pick_payload(parsed)
+    if sig_alg_raw in ("x509-rsa-pss-sha256", "x509-ecdsa-p256-sha256"):
+        raise ValueError(f"{_ERR_SIG_ALG_NOT_IMPLEMENTED} {sig_alg_raw}")
+    raise ValueError(f"{_ERR_SIG_ALG_UNSUPPORTED} {sig_alg_raw}")
 
 
 def _verify_ed25519_pick_payload(parsed: dict) -> bytes:
@@ -735,10 +1133,33 @@ def _cms_verify_signer_info(signer_info, signer_cert, signed_data) -> None:
         raise ValueError("unsupported public key type in TSA signer certificate") from None
 
 
-def _verify_rfc3161_token_b64(b64s: str, canonical_payload: bytes) -> None:
-    """Decode RFC 3161 TimeStampResp; check status, imprint vs canonical payload, CMS signature."""
-    import hashlib
+def _cms_assert_timestamping_eku(signer_cert) -> None:
+    """Require id-kp-timeStamping ExtendedKeyUsage on the TSA signer certificate."""
+    from cryptography import x509 as crypto_x509
+    from cryptography.hazmat.backends import default_backend
 
+    cert_crypto = crypto_x509.load_der_x509_certificate(signer_cert.dump(), default_backend())
+    try:
+        ext = cert_crypto.extensions.get_extension_for_class(crypto_x509.ExtendedKeyUsage)
+    except crypto_x509.ExtensionNotFound:
+        raise ValueError("TSA_EKU_MISSING: signer cert lacks ExtendedKeyUsage extension") from None
+    timestamping_oid = "1.3.6.1.5.5.7.3.8"
+    found = False
+    for usage in ext.value:
+        if getattr(usage, "dotted_string", None) == timestamping_oid:
+            found = True
+            break
+    if not found:
+        raise ValueError("TSA_EKU_MISSING: signer cert lacks id-kp-timeStamping EKU") from None
+
+
+def _verify_rfc3161_token_b64(
+    b64s: str,
+    canonical_payload: bytes,
+    *,
+    expected_nonce_hex: str | None = None,
+) -> None:
+    """Decode RFC 3161 TimeStampResp; verify imprint, optional TSTInfo nonce match, EKU, CMS."""
     try:
         from asn1crypto import cms, tsp as tsp_mod
     except ImportError as e:
@@ -765,6 +1186,18 @@ def _verify_rfc3161_token_b64(b64s: str, canonical_payload: bytes) -> None:
     if digest != mi["hashed_message"].native:
         raise ValueError("TSA message imprint does not match canonical attestation payload")
 
+    if expected_nonce_hex:
+        try:
+            expected_nonce = int(str(expected_nonce_hex), 16)
+        except (TypeError, ValueError):
+            raise ValueError("TSA_NONCE_MISMATCH: malformed predicate nonce") from None
+        try:
+            response_nonce = tst_info["nonce"].native
+        except Exception:
+            response_nonce = None
+        if response_nonce is None or int(response_nonce) != expected_nonce:
+            raise ValueError("TSA_NONCE_MISMATCH: response nonce does not match request nonce") from None
+
     signer_infos = signed_data["signer_infos"]
     if len(signer_infos) == 0:
         raise ValueError("no signer_infos in timestamp token")
@@ -772,6 +1205,7 @@ def _verify_rfc3161_token_b64(b64s: str, canonical_payload: bytes) -> None:
     if not certs:
         raise ValueError("no certificates in timestamp token")
     signer_cert = _cms_match_signer_cert(signer_infos[0], certs)
+    _cms_assert_timestamping_eku(signer_cert)
     _cms_verify_signer_info(signer_infos[0], signer_cert, signed_data)
 
 
@@ -779,8 +1213,13 @@ def _verify_tsa(parsed: dict, canonical_payload_bytes: bytes) -> tuple[bool, str
     """Verify TSA when --verify-tsa: RFC 3161 token or legacy Ed25519 predicate.tsa; fail-closed if neither."""
     rfc = parsed.get("rfc3161_token_b64")
     if isinstance(rfc, str) and rfc.strip():
+        nonce_hex = parsed.get("nonce_hex")
         try:
-            _verify_rfc3161_token_b64(rfc.strip(), canonical_payload_bytes)
+            _verify_rfc3161_token_b64(
+                rfc.strip(),
+                canonical_payload_bytes,
+                expected_nonce_hex=str(nonce_hex).strip() if isinstance(nonce_hex, str) and nonce_hex else None,
+            )
             return True, "tsa_rfc3161_verified"
         except Exception as e:
             return False, f"{_ERR_TSA_INVALID} {e}"
@@ -861,7 +1300,7 @@ def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None, verify_
         return False, f"Target file not found: {target_path}"
     try:
         _validate_key_registry_window(parsed)
-        payload = _verify_ed25519_pick_payload(parsed)
+        payload = _verify_signature_pick_payload(parsed)
     except Exception as e:
         return False, f"{_ERR_BAD_SIGNATURE} {e}"
     if verify_tsa:
@@ -952,6 +1391,7 @@ def verify_directory_from_manifest(
     Returns a JSON-serializable dict with:
       - schema_version
       - modified, created, deleted, mutated_during_verification, skipped
+      - files_scanned, lineage (manifest lineage.json summary when applicable)
       - algo_stats, timing
     """
     import fnmatch
@@ -1018,6 +1458,7 @@ def verify_directory_from_manifest(
             rel_dir = os.path.relpath(dirpath, walk_root)
             rel_dir = "" if rel_dir == "." else rel_dir
             for name in filenames:
+                # Exclude cryptographic artifacts from "Created" drift walk noise.
                 if name.endswith(".f33") or name == "fors33-manifest.json":
                     continue
                 rel_path = os.path.join(rel_dir, name) if rel_dir else name
@@ -1063,28 +1504,59 @@ def verify_directory_from_manifest(
     def _hash_worker(item: tuple[str, str, str, str, str]):
         work_key, rel, path, algo, expected = item
         if _abort_event.is_set():
-            return ("aborted", work_key, rel, algo, expected, None, "manifest_compromised_abort")
-        kpath = path_for_kernel(path)
-        sidecar_path = f"{path}.f33"
+            return ("skipped", work_key, rel, algo, expected, None, "abort_event_set", None)
+
+        target_basename = os.path.basename(path)
+        sidecar_path = os.path.join(os.path.dirname(path), f"{target_basename}.f33")
+        sidecar_target_expected = target_basename
+
         try:
-            if not os.path.isfile(kpath):
-                return ("deleted", work_key, rel, algo, expected, None, None)
-            if not os.path.isfile(path_for_kernel(sidecar_path)):
-                return ("missing_seal", work_key, rel, algo, expected, None, _ERR_MISSING_SEAL)
             parsed = _parse_f33(sidecar_path)
-            try:
-                _validate_key_registry_window(parsed)
-                payload = _verify_ed25519_pick_payload(parsed)
-            except Exception as e:
-                return ("bad_signature", work_key, rel, algo, expected, None, f"{_ERR_BAD_SIGNATURE} {e}")
-            if verify_tsa:
-                tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
-                if not tsa_ok:
-                    return ("tsa_invalid", work_key, rel, algo, expected, None, tsa_msg)
-            sidecar_digest = str(parsed["file_digest"]).lower()
-            if sidecar_digest != expected.lower():
-                _abort_event.set()
-                raise ManifestCompromisedError(rel, expected, sidecar_digest)
+        except FileNotFoundError:
+            return ("modified", work_key, rel, algo, expected, expected, None, _ERR_MISSING_SEAL)
+        except PermissionError:
+            return ("skipped", work_key, rel, algo, expected, None, "access_denied", None)
+        except ValueError:
+            return ("modified", work_key, rel, algo, expected, expected, None, _ERR_INVALID_SEAL_FORMAT)
+        except OSError as e:
+            return ("skipped", work_key, rel, algo, expected, None, str(e), None)
+        except Exception as e:
+            return ("skipped", work_key, rel, algo, expected, None, f"sidecar_parse_error: {e}", None)
+
+        if parsed.get("target") != sidecar_target_expected:
+            return ("modified", work_key, rel, algo, expected, expected, None, _ERR_INVALID_SEAL_FORMAT)
+
+        try:
+            _validate_key_registry_window(parsed)
+            payload = _verify_signature_pick_payload(parsed)
+        except Exception as e:
+            return (
+                "modified",
+                work_key,
+                rel,
+                algo,
+                expected,
+                parsed["file_digest"],
+                None,
+                f"{_ERR_BAD_SIGNATURE} {e}",
+            )
+
+        if verify_tsa:
+            tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
+            if not tsa_ok:
+                return (
+                    "modified",
+                    work_key,
+                    rel,
+                    algo,
+                    expected,
+                    parsed["file_digest"],
+                    None,
+                    tsa_msg or _ERR_TSA_INVALID,
+                )
+
+        kpath = path_for_kernel(path)
+        try:
             st_before = os.stat(kpath)
             before_key: int | tuple[int, int] = (
                 (st_before.st_dev, st_before.st_ino)
@@ -1094,6 +1566,7 @@ def verify_directory_from_manifest(
             size = os.path.getsize(kpath)
             progress_cb = None
             if progress_event_callback is not None:
+
                 def _progress_headless(br: int, tb: int) -> None:
                     if tb > 0:
                         pct = min(100, int(br * 100 / tb))
@@ -1113,7 +1586,14 @@ def verify_directory_from_manifest(
                             print(f"\r\033[K[VERIFY] Hashing {rel}: {pct}%", end="", file=sys.stderr)
 
                 progress_cb = _progress
-            computed = hash_file(kpath, algo=algo, progress_callback=progress_cb)
+
+            computed = hash_file(
+                kpath,
+                algo=parsed["digest_algo"],
+                start=parsed["range_start"],
+                end=parsed["range_end"],
+                progress_callback=progress_cb,
+            )
             if progress_cb and sys.stderr.isatty():
                 print(file=sys.stderr)
             st_after = os.stat(kpath)
@@ -1122,18 +1602,16 @@ def verify_directory_from_manifest(
                 if st_after.st_ino != 0
                 else int(st_after.st_mtime)
             )
-        except ManifestCompromisedError:
-            raise
         except FileNotFoundError:
-            return ("deleted", work_key, rel, algo, expected, None, None)
+            return ("deleted", work_key, rel, algo, expected, None, None, None)
         except PermissionError:
-            return ("skipped", work_key, rel, algo, expected, None, "access_denied")
+            return ("skipped", work_key, rel, algo, expected, None, "access_denied", None)
         except OSError as e:
-            return ("skipped", work_key, rel, algo, expected, None, str(e))
+            return ("skipped", work_key, rel, algo, expected, None, str(e), None)
         except Exception as e:
             msg = f"Unhandled worker exception: {e}"
             print(f"[ERROR] {msg}", file=sys.stderr)
-            return ("skipped", work_key, rel, algo, expected, None, msg)
+            return ("skipped", work_key, rel, algo, expected, None, msg, None)
 
         if before_key != after_key:
             return (
@@ -1144,56 +1622,46 @@ def verify_directory_from_manifest(
                 expected,
                 None,
                 "inode_or_mtime_changed_during_hash",
+                None,
             )
-        if computed.lower() != expected.lower():
-            return ("seal_broken", work_key, rel, algo, expected, computed.lower(), _ERR_DATA_DRIFT)
-        return ("ok", work_key, rel, algo, expected, None, None)
 
-    executor = ThreadPoolExecutor(max_workers=resolve_manifest_worker_count(max_workers))
+        computed_l = computed.lower()
+        sidecar_digest_l = str(parsed["file_digest"]).lower()
+        if computed_l != sidecar_digest_l:
+            return (
+                "modified",
+                work_key,
+                rel,
+                algo,
+                expected,
+                computed_l,
+                None,
+                _ERR_DATA_DRIFT,
+            )
+
+        expected_l = str(expected or "").lower()
+        if sidecar_digest_l != expected_l:
+            _abort_event.set()
+            raise ManifestCompromisedError(_ERR_MANIFEST_COMPROMISED)
+
+        return ("ok", work_key, rel, algo, expected, None, None, None)
+
+    effective_workers = resolve_manifest_worker_count(max_workers)
+    executor = ThreadPoolExecutor(max_workers=effective_workers)
+    aborted = False
     try:
-        for kind, wk, rel, algo, expected, computed, err in executor.map(
+        for kind, wk, rel, algo, expected, computed, err, status in executor.map(
             _hash_worker, _work_generator()
         ):
             work_key = wk
-            if kind == "seal_broken":
+            if kind == "modified":
                 modified.append(
                     {
                         "path": rel,
                         "digest": computed,
                         "expected_digest": expected,
                         "algo": algo,
-                        "status": _ERR_DATA_DRIFT,
-                        "reason": err,
-                    }
-                )
-            elif kind == "missing_seal":
-                modified.append(
-                    {
-                        "path": rel,
-                        "algo": algo,
-                        "expected_digest": expected,
-                        "status": _ERR_MISSING_SEAL,
-                        "reason": err or _ERR_MISSING_SEAL,
-                    }
-                )
-            elif kind == "bad_signature":
-                modified.append(
-                    {
-                        "path": rel,
-                        "algo": algo,
-                        "expected_digest": expected,
-                        "status": _ERR_BAD_SIGNATURE,
-                        "reason": err or _ERR_BAD_SIGNATURE,
-                    }
-                )
-            elif kind == "tsa_invalid":
-                modified.append(
-                    {
-                        "path": rel,
-                        "algo": algo,
-                        "expected_digest": expected,
-                        "status": _ERR_TSA_INVALID,
-                        "reason": err or _ERR_TSA_INVALID,
+                        "status": status or "modified",
                     }
                 )
             elif kind == "mutated":
@@ -1215,36 +1683,30 @@ def verify_directory_from_manifest(
                         "status": "skipped",
                     }
                 )
-            # Mark as seen for all non-deleted paths
             live_paths.pop(work_key, None)
-    except ManifestCompromisedError as e:
+    except ManifestCompromisedError:
+        aborted = True
+        _abort_event.set()
         executor.shutdown(wait=False, cancel_futures=True)
-        for k in list(live_paths.keys()):
-            rel_only = k.split(":", 1)[1] if ":" in k and k[0].isdigit() else k
-            if rel_only == e.rel:
-                live_paths.pop(k, None)
-        modified.append(
-            {
-                "path": e.rel,
-                "expected_digest": e.expected_digest,
-                "digest": e.sidecar_digest,
-                "status": _ERR_MANIFEST_COMPROMISED,
-                "reason": _ERR_MANIFEST_COMPROMISED,
-            }
-        )
+        raise
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         sys.exit(130)
     finally:
-        executor.shutdown(wait=True)
+        if not aborted:
+            executor.shutdown(wait=True)
 
-    # Remaining live files that were not in manifest are "created"
+    # Remaining live paths that were not in manifest are "created" (extension uses dict keys verbatim).
     for norm_rel in sorted(live_paths.keys()):
-        rel_only = norm_rel.split(":", 1)[1] if ":" in norm_rel and norm_rel[0].isdigit() else norm_rel
-        rel_lower = rel_only.lower()
-        if rel_lower.endswith(".f33") or rel_lower.endswith("/fors33-manifest.json") or rel_lower == "fors33-manifest.json":
-            continue
-        created.append({"path": rel_only, "status": "created"})
+        created.append({"path": norm_rel, "status": "created"})
+
+    lineage_summary, lineage_extra = _verify_lineage_json_against_manifest(
+        manifest_path,
+        roots_resolved,
+        modified,
+        deleted,
+    )
+    modified.extend(lineage_extra)
 
     end_monotonic = datetime.now(timezone.utc).timestamp()
 
@@ -1269,6 +1731,9 @@ def verify_directory_from_manifest(
             "started_at": start_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "duration_seconds": max(0.0, end_monotonic - start_monotonic),
         },
+        # Mirrors extension semantics: residual live_paths keys after manifest pops (often "created" count).
+        "files_scanned": len(live_paths),
+        "lineage": lineage_summary,
     }
     return result
 
@@ -1316,6 +1781,8 @@ def execute_verification(
         root=result["root"],
         roots=result.get("roots"),
         timing=result["timing"],
+        files_scanned=int(result.get("files_scanned", 0)),
+        lineage=result.get("lineage"),
     )
 
 
@@ -1711,7 +2178,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--verify-receipt",
-        help="Path to .f33-receipt file for standalone verification (requires --root for dataset directory).",
+        help=(
+            "Path to .f33-receipt file for standalone verification "
+            "(requires --root for the dataset directory containing fors33-manifest.json)."
+        ),
     )
     parser.add_argument(
         "--audit-package",
@@ -1907,6 +2377,8 @@ def main() -> int:
                 "mutated_during_verification": report.mutated,
                 "skipped": report.skipped,
                 "timing": report.timing,
+                "files_scanned": report.files_scanned,
+                "lineage": report.lineage,
             }
         except Exception as e:
             print(f"Manifest verification failed: {e}", file=sys.stderr)
@@ -1958,6 +2430,9 @@ def main() -> int:
             _ERR_TSA_INVALID,
         }
         if any(str(m.get("status", "")) in severe_statuses for m in modified):
+            exit_code = EXIT_SEVERE
+        lin = result.get("lineage")
+        if isinstance(lin, dict) and lin.get("status") == "broken":
             exit_code = EXIT_SEVERE
         if args.warn_only:
             return EXIT_OK

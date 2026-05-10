@@ -310,6 +310,11 @@ def hash_file(
         except OSError:
             pass
 
+    # Bounded mmap fast path:
+    # - whole-file only (start == 0, end is None)
+    # - total_bytes must be known and within cgroup/RAM-clamped bounds
+    # - optional PSI avg10 may disable mmap (FORS33_MMAP_PSI_SOME_AVG10_MAX)
+    # - on any mmap failure, fall back to the chunked reader below
     mmap_min, mmap_max = _effective_mmap_bounds_bytes()
     psi_mmap_off = _mmap_psi_disables_mmap()
     can_try_mmap = (
@@ -332,6 +337,7 @@ def hash_file(
                         progress_callback(total_bytes, total_bytes)
                 return hasher.hexdigest()
             except Exception:
+                # Fall through to chunked reading.
                 pass
         f.seek(start)
         if remaining is not None:

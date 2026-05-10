@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.8.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-0.9.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.8.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-0.9.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -11,13 +11,44 @@ Standalone verification for attested data segments and general-purpose file inte
 
 > Warning: FORS33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md).
 
+<details>
+<summary><strong>Release notes &amp; version history</strong></summary>
+
+### 0.9.0 (2026-05-10)
+
+- **Manifest-mode extension parity**: Sidecar path **`dirname(target)/basename(target).f33`**, predicate byte-range hashing, triangle check order (data vs seal vs manifest), **`ManifestCompromisedError` fail-fast** after pool shutdown (no completed JSON with a synthetic compromise row).
+- **`lineage.json`**: After per-file verification, declares upstream digests checked against the same manifest `entries`; structured **`lineage`** object and **`files_scanned`** field in JSON (see [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md)).
+- **`created`** drift paths use multi-root keys verbatim (for example `0:relative/path`), matching extension output.
+
+### 0.8.1 (2026-05-10)
+
+- **Wave 3 predicate parity**: Optional sidecar fields (`signature_intent`, `reason_for_change`, `sig_alg`, `nonce_hex`, `source_fingerprint`) use the same canonical payload rules as the L3dgr extension. Reserved X.509 `sig_alg` tags fail with stable `SIG_ALG_NOT_IMPLEMENTED` until chain validation ships.
+- **Manifest HMAC**: `verify_manifest_hmac()` in `verify_dpk` validates an optional `fors33-manifest.hmac` sidecar when a pepper is supplied; missing sidecar is legacy-OK (`absent`).
+- **TSA**: RFC 3161 path enforces TSA signer **id-kp-timeStamping** EKU; optional **nonce** check when `nonce_hex` is present in the predicate (`TSA_EKU_MISSING`, `TSA_NONCE_MISMATCH`).
+- **Receipts**: `receipt_core` adds `generate_verification_receipt`, `receipt_to_json`, `receipt_to_base64`; `verify_receipt` loads `fors33-manifest.json` via `manifest_core.load_manifest(..., dataset_path)` like the extension.
+- **Supply chain**: Docker images built by `publish-fors33-verifier` attach **SBOM** and **SLSA provenance** (`build-push-action` `sbom: true`, `provenance: mode=max`). Pin by digest in regulated CI.
+
+### 0.8.0 (2026-05-01)
+
+- Batch mode: `--directory` with concurrent verification of multiple PDF/ZIP/sealed datasets; `--json` summary; thread-safe output.
+
+### 0.7.0 (2026-04-28)
+
+- `--verify-receipt`, audit package / smart `--file` routing, `source_fingerprint` in predicates, enhanced TSA token formats, zero-copy ZIP reads.
+
+### Earlier
+
+- **0.6.0** and older: manifest hash chains, in-toto Statement v0.1/v1, canonical payload V1/V2, registry window, `hash_core` mmap workers. Full text: [CHANGELOG.md](CHANGELOG.md).
+
+</details>
+
 ## Install
 
 ```bash
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.8.0`) and **`push_latest`**—it does **not** run automatically on git tags.
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.9.0`) and **`push_latest`**—it does **not** run automatically on git tags.
 
 ## Usage
 
@@ -53,7 +84,7 @@ The attestation record JSON must contain `byte_start`, `byte_end`, and `hash`. U
 fors33-verifier --mode manifest --file ./baseline.sha256 --root ./root --format json
 ```
 Use `--root` (or deprecated `--target-dir`) for the directory to verify. MD5/SHA-1 in manifests are rejected by default; use `--force-insecure` for legacy manifests.
-Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emits a structured drift report with `modified`, `created`, `deleted`, `mutated_during_verification`, and `skipped`.
+Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emits a structured drift report with `modified`, `created`, `deleted`, `mutated_during_verification`, `skipped`, **`files_scanned`** (extension-style residual live-path metric), and **`lineage`** when **`lineage.json`** rows are present (see [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md)).
 
 **Sidecar verification:**
 ```bash
@@ -66,13 +97,13 @@ Optional TSA verification for JSON `.f33` sidecars:
 fors33-verifier --mode manifest --verify-tsa --file ./manifest.json --root ./root --format json
 ```
 
-With `--verify-tsa`, the verifier accepts **`predicate.tsa.response_token`** (new enhanced format) or **`predicate.tsa.rfc3161_token_b64`** (legacy format) or top-level **`predicate.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, and **message imprint** (hash OID from the token) over the same **canonical attestation bytes** used for the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent). MD5/SHA-1 imprint algorithms are rejected.
+With `--verify-tsa`, the verifier accepts **`predicate.tsa.response_token`** (new enhanced format) or **`predicate.tsa.rfc3161_token_b64`** (legacy format) or top-level **`predicate.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, **message imprint** (hash OID from the token) over the same **canonical attestation bytes** as the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent), **TSA signer EKU** (`id-kp-timeStamping`), and optional **TSTInfo nonce** vs predicate **`nonce_hex`** when present. MD5/SHA-1 imprint algorithms are rejected.
 
 **Receipt verification (standalone dataset verification):**
 ```bash
 fors33-verifier --verify-receipt receipt.json --root ./dataset
 ```
-Verifies a portable JSON receipt containing dataset digest and Ed25519 signature. Receipts enable offline verification without requiring the original verifier daemon.
+Verifies a portable JSON receipt (dataset digest + Ed25519 signature) against **`fors33-manifest.json`** under `--root`. The Python module **`receipt_core`** also exposes `generate_verification_receipt`, `receipt_to_json`, `receipt_to_base64`, and `verify_receipt` for tooling and tests.
 
 **Audit package verification (PDF with detached signature):**
 ```bash
@@ -132,7 +163,7 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.7.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.9.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
@@ -156,12 +187,12 @@ The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33/fors33-verifier:0.8.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33/fors33-verifier:0.9.0 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:0.8.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:0.9.0 --file /data/file.csv --expected-hash <sha256>
 ```
 
-`:latest` is convenient for exploration; pin a **version tag** or **digest** in production pipelines so runs stay reproducible.
+Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.
 
 ## URL-only API
 

@@ -23,6 +23,7 @@ try:  # Support both package and flat-module imports
 except ImportError:  # pragma: no cover - flat layout
     from hash_core import infer_algo_from_digest  # type: ignore[import]
 
+# Linear hash chain over manifest rows (optional; see chain_version on manifest root).
 MANIFEST_CHAIN_VERSION = "1"
 MANIFEST_GENESIS_PREVIOUS_HASH = hashlib.sha256(b"").hexdigest()
 
@@ -50,6 +51,7 @@ def _parse_gnu_checksum(path: Path) -> Iterator[ManifestEntry]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        # Fast-path split
         parts = line.split(" ", 1)
         digest = None
         rel_path = None
@@ -103,6 +105,7 @@ def _parse_json_manifest(
     roots: Optional[List[str]] = None
     if isinstance(raw, dict):
         files = []
+        # Canonical L3dgr manifest format: {"version":"1.0","entries":[...]}
         if "entries" in raw and isinstance(raw.get("entries"), list):
             for item in raw.get("entries") or []:
                 if not isinstance(item, dict):
@@ -124,6 +127,7 @@ def _parse_json_manifest(
                         "algo": str(ha).lower(),
                     }
                 )
+        # In-toto Statement style manifest with subject list.
         elif isinstance(raw.get("subject"), list):
             for sub in raw.get("subject") or []:
                 if not isinstance(sub, dict):
@@ -199,6 +203,7 @@ def load_manifest(
             roots = [os.path.abspath(fallback_root_dir)]
         return (entries, roots if roots else ([fallback_root_dir] if fallback_root_dir else []))
 
+    # GNU or BSD
     gnu_iter = _parse_gnu_checksum(path)
     try:
         first = next(gnu_iter)

@@ -2,6 +2,41 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.9.0] - 2026-05-10
+
+### Added
+
+- **`lineage.json` verification** (schema `1.0`) at the end of manifest directory verify: cross-checks declared inputs against trusted `fors33-manifest.json` rows; JSON result includes **`lineage`** (`status`, `files_checked`, `reports`). Broken lineage appends rows to **`modified`** and forces severe exit in CLI when `lineage.status` is **`broken`**. Public summary: [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md).
+
+### Changed
+
+- **Manifest verification worker** aligned with the Docker extension backend: sidecar path resolves as `dirname(target)/basename(target).f33`; hashes the **predicate byte range** (`digest_algo`, `range_start` / `range_end`); compares **computed vs sidecar digest** before **sidecar vs manifest**; `modified[]` rows omit ad-hoc **`reason`** keys in favor of extension-style **`status`** strings.
+- **`ManifestCompromisedError`**: Raised when the signed sidecar disagrees with the manifest digest **after** cooperative thread-pool shutdown (**fail-fast**, no partial continuation with a synthetic `modified` row). Subclasses **`RuntimeError`** without extra fields.
+- **`created[]` paths**: Multi-root drift uses **verbatim** `live_paths` keys (for example `0:relative/path`) to match extension JSON.
+- **`VerificationReport`** / CLI JSON: **`files_scanned`** echoes extension semantics (residual `live_paths` length after manifest pops, typically aligned with created drift count); **`lineage`** summary included when using `execute_verification` / `--format json`.
+
+### Compatibility
+
+- Automation that relied on catching **`ManifestCompromisedError.rel`** or on receiving a **completed** JSON payload while listing manifest compromise under `modified` must be updated for the fail-fast path.
+
+## [0.8.1] - 2026-05-10
+
+### Added
+
+- **Wave 3 verification alignment**: Optional predicate fields `signature_intent`, `reason_for_change`, `sig_alg`, `nonce_hex`, and `source_fingerprint` feed the same canonical payload rules as the L3dgr extension. `sig_alg` dispatches through `_verify_signature_pick_payload`; reserved X.509 tags raise `SIG_ALG_NOT_IMPLEMENTED` until chain validation ships.
+- **`verify_manifest_hmac`**: Verifies optional `fors33-manifest.hmac` sidecar when a pepper is supplied; missing sidecar returns legacy-OK `absent`.
+- **TSA hardening**: RFC 3161 path checks optional `TSTInfo.nonce` against predicate `nonce_hex` when present; TSA signer certs must include `id-kp-timeStamping` EKU (`TSA_EKU_MISSING` / `TSA_NONCE_MISMATCH` errors).
+- **`generate_verification_receipt` / `receipt_to_json` / `receipt_to_base64`** in `receipt_core` for parity with extension receipt tooling and tests.
+
+### Changed
+
+- **`receipt_core.verify_receipt`**: Uses `manifest_core.load_manifest(..., dataset_path)` tuple unpack and digest comparison aligned with extension.
+- **Docker publish workflow**: Buildx `sbom: true` and `provenance: mode=max` on versioned and `:latest` pushes; `id-token: write` for attestations.
+
+### Security
+
+- Supply chain: OCI SBOM and SLSA provenance attachments on GHCR/Docker Hub images from the publish workflow.
+
 ## [0.8.0] - 2026-05-01
 
 ### Added

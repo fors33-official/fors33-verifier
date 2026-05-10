@@ -18,9 +18,13 @@ Use the fors33-verifier package. Install with `pip install fors33-verifier`. For
 
 `fors33-verifier --mode manifest --file /path/to/manifest.json --root /path/to/root`. Supports GNU coreutils checksum text, BSD/OpenSSL format, and JSON manifests (including `entries` / `subject` shapes and optional `chain_version` hash chain). Use `--format json` for structured output. `--target-dir` is a deprecated alias for `--root`.
 
+Structured JSON includes **`lineage`** (derived-data `lineage.json` cross-check against manifest `entries`) and **`files_scanned`** (extension-aligned residual live-path metric after manifest membership pops). Broken lineage sets severe exit in addition to drift listing. See [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md) for a scrubbed schema summary.
+
+If the signed sidecar digest disagrees with the manifest row after data-vs-seal checks pass, the library raises **`ManifestCompromisedError`** and manifest-mode verification **stops** (fail-fast after thread-pool shutdown); callers must handle the exception instead of assuming a full JSON body.
+
 Workers: positive `--workers` overrides non-positive `FORS33_WORKERS`; otherwise `default_dpk_worker_count()` with optional `FORS33_DPK_MAX_WORKERS`. `F33_KEY_REGISTRY_PATH` when non-empty must point to a readable operator registry file.
 
-`.f33` sidecars use in-toto Statement v0.1 or v1; Ed25519 verifies line-oriented V1/V2 canonical payloads or legacy JSON when `canonical_payload_version` is absent.
+`.f33` sidecars use in-toto Statement v0.1 or v1; Ed25519 verifies line-oriented V1/V2 canonical payloads or legacy JSON when `canonical_payload_version` is absent. Verification hashes the **predicate byte range** (`range_start` / `range_end`) with the sidecar `digest_algo`.
 
 ## Keywords
 

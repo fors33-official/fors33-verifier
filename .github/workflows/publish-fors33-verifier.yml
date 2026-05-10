@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     steps:
       - name: Checkout
@@ -63,6 +64,8 @@ jobs:
             docker.io/fors33/fors33-verifier:${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
 
       - name: Build and push latest tags
         if: ${{ steps.meta.outputs.push_latest == 'true' }}
@@ -76,3 +79,5 @@ jobs:
             docker.io/fors33/fors33-verifier:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
