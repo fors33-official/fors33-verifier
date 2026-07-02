@@ -82,8 +82,9 @@ EXIT_USAGE = 2
 EXIT_SEVERE = 3
 
 _COMPLIANCE_NOTICE_LINES = (
-    "[NOTICE]  FORS33 Data Provenance Kit verifier",
+    "[NOTICE]  Fors33 Data Provenance Kit verifier",
     "[NOTICE]  Output describes integrity checks only; it is not legal advice.",
+    "[NOTICE]  Full legal terms: https://fors33.com/legal",
     "[NOTICE]  Validate results in your own compliance and audit workflow.",
     "[NOTICE]  Unauthorized use is prohibited.",
 )

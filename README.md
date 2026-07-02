@@ -7,9 +7,9 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
-Standalone verification for attested data segments and general-purpose file integrity baselines. For machine-readable context (LLMs, crawlers), see [LLM_CONTEXT.md](LLM_CONTEXT.md). Confirm that a data segment or directory tree matches published hashes.
+Standalone verification for attested data segments and general-purpose file integrity baselines. Confirm that a data segment or directory tree matches published hashes. For structured package context, see [LLM_CONTEXT.md](LLM_CONTEXT.md).
 
-> Warning: Fors33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md).
+> **Legal:** Fors33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md) and [full legal terms at fors33.com/legal](https://fors33.com/legal).
 
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
@@ -211,7 +211,7 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **Fors33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.9.1`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.9.3`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
@@ -252,4 +252,4 @@ Python 3.9–3.12. `cryptography` and `asn1crypto` (required). Optional `blake3`
 
 ## License
 
-MIT License. See LICENSE file.
+MIT License. See [LICENSE](LICENSE). Legal and regulatory boundaries: [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md) and [fors33.com/legal](https://fors33.com/legal).

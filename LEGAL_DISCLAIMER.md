@@ -1,6 +1,8 @@
 # Legal and Regulatory Disclaimer
 
-The FORS33 Verifier (the "Software") provides cryptographic tools for verifying data attestations, checking file integrity, and detecting data drift.
+The Fors33 Verifier (the "Software") provides cryptographic tools for verifying data attestations, checking file integrity, and detecting data drift.
+
+Full legal terms: [fors33.com/legal](https://fors33.com/legal)
 
 ## No Warranty or Liability
 
@@ -10,8 +12,13 @@ In no event shall the authors or copyright holders be liable for any claim, dama
 
 ## Not Regulatory Advice
 
-Use of this Software does not guarantee compliance with financial, legal, or regulatory frameworks, including but not limited to SEC Rule 17a-4, CFTC Rule 1.31, or FINRA guidance.
+Use of this Software does not establish, guarantee, or certify compliance with any financial, legal, or regulatory frameworks. This includes, but is not limited to:
 
-FORS33 Verifier supports cryptographic integrity checks and tamper detection. Regulatory compliance requires independent controls in infrastructure, retention policy, and audit processes.
+- SEC Rule 17a-4
+- CFTC Rule 1.31
+- FINRA guidelines
+- ESMA chain-of-custody expectations (e.g. MiFID II record-keeping and clock-sync guidance)
+
+Fors33 Verifier supports cryptographic integrity checks and tamper detection. Regulatory compliance requires independent controls in infrastructure, retention policy, and audit processes.
 
 Users are solely responsible for ensuring their storage and retention systems provide required Write-Once-Read-Many (WORM) guarantees and satisfy applicable legal obligations.
