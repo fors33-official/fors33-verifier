@@ -235,9 +235,9 @@ The Fors33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33/fors33-verifier:0.9.1 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.9.3 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:0.9.1 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:v0.9.3 --file /data/file.csv --expected-hash <sha256>
 ```
 
 Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.
