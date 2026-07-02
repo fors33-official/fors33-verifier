@@ -31,18 +31,34 @@ try:  # Support both package and flat-module imports
         hash_file,
         hash_stream,
         infer_algo_from_digest,
+        is_epoch_upload_companion_basename,
         path_for_kernel,
     )
-    from .manifest_core import ManifestEntry, load_manifest, verify_manifest_hash_chain  # type: ignore[import]
+    from .manifest_core import (  # type: ignore[import]
+        ManifestEntry,
+        discover_bagit_layout,
+        load_manifest,
+        resolve_manifest_member_path,
+        verify_manifest_hash_chain,
+        _is_manifest_abs_path,
+    )
 except ImportError:  # pragma: no cover - flat layout
     from hash_core import (  # type: ignore[import]
         default_dpk_worker_count,
         hash_file,
         hash_stream,
         infer_algo_from_digest,
+        is_epoch_upload_companion_basename,
         path_for_kernel,
     )
-    from manifest_core import ManifestEntry, load_manifest, verify_manifest_hash_chain  # type: ignore[import]
+    from manifest_core import (  # type: ignore[import]
+        ManifestEntry,
+        discover_bagit_layout,
+        load_manifest,
+        resolve_manifest_member_path,
+        verify_manifest_hash_chain,
+        _is_manifest_abs_path,
+    )
 
 try:
     import urllib.request
@@ -188,6 +204,35 @@ def _validate_signature_intent(value: str | None) -> str | None:
     raise ValueError(
         f"signature_intent must be one of {SIGNATURE_INTENT_VALUES}; got {value!r}"
     )
+
+
+_SOURCE_FINGERPRINT_STRUCT_KEYS = (
+    "tls_fingerprint_sha256",
+    "tls_subject",
+    "tls_subject_alt_names",
+    "tls_issuer",
+)
+
+
+def canonical_source_fingerprint_string(struct: dict) -> str | None:
+    """Deterministic compact JSON for canonical payload SOURCE_FINGERPRINT (V2)."""
+    if not isinstance(struct, dict) or not struct:
+        return None
+    cleaned = {k: struct[k] for k in _SOURCE_FINGERPRINT_STRUCT_KEYS if k in struct}
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, sort_keys=True, separators=(",", ":"))
+
+
+def source_fingerprint_from_predicate(predicate: dict) -> str | None:
+    """Resolve the signed source_fingerprint string from a sidecar predicate."""
+    raw = predicate.get("source_fingerprint")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    struct = predicate.get("source_fingerprint_struct")
+    if isinstance(struct, dict):
+        return canonical_source_fingerprint_string(struct)
+    return None
 
 
 def build_canonical_payload(
@@ -896,7 +941,7 @@ def _parse_f33(sidecar_path: str) -> dict:
         "operator_key_id_canonical": _pred_opt_str(predicate, "operator_key_id"),
         "authorized_operator": _pred_opt_str(predicate, "authorized_operator"),
         "organization": _pred_opt_str(predicate, "organization"),
-        "source_fingerprint": _pred_opt_str(predicate, "source_fingerprint"),
+        "source_fingerprint": source_fingerprint_from_predicate(predicate),
         "signature_intent": _pred_opt_str(predicate, "signature_intent"),
         "reason_for_change": _pred_opt_str(predicate, "reason_for_change"),
         "sig_alg": _pred_opt_str(predicate, "sig_alg"),
@@ -1028,6 +1073,9 @@ def _validate_key_registry_window(parsed: dict) -> None:
         if signed_at < valid_from:
             continue
         if valid_to is not None and signed_at > valid_to:
+            continue
+        revoked_at = _parse_utc(str(row.get("revoked_at") or "")) if row.get("revoked_at") else None
+        if revoked_at is not None and signed_at >= revoked_at:
             continue
         matched = True
         break
@@ -1321,8 +1369,14 @@ def _verify_manifest_ed25519_signature(
     return True, "Manifest signature verified"
 
 
-def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None, verify_tsa: bool = False) -> tuple[bool, str]:
+def verify_sidecar_f33(
+    sidecar_path: str,
+    target_dir: str | None = None,
+    verify_tsa: bool = False,
+    regulated_verify: bool = False,
+) -> tuple[bool, str]:
     """Verify .f33 sidecar: resolve target, hash range, check digest and Ed25519. Returns (success, message)."""
+    _ = regulated_verify  # OSS stub: regulated TSA path is extension-only.
     try:
         parsed = _parse_f33(sidecar_path)
     except ValueError:
@@ -1458,6 +1512,10 @@ def verify_directory_from_manifest(
     start_ts = datetime.now(timezone.utc)
     start_monotonic = start_ts.timestamp()
 
+    preflight = verify_manifest_bundle_preflight(manifest_path, root_dir)
+    if preflight:
+        raise ValueError(preflight)
+
     if sys.stderr.isatty():
         print("[SYS] Building manifest tree...", end="", file=sys.stderr)
         sys.stderr.flush()
@@ -1517,8 +1575,12 @@ def verify_directory_from_manifest(
             rel_dir = os.path.relpath(dirpath, walk_root)
             rel_dir = "" if rel_dir == "." else rel_dir
             for name in filenames:
-                # Exclude cryptographic artifacts from "Created" drift walk noise.
-                if name.endswith(".f33") or name == "fors33-manifest.json":
+                # Exclude cryptographic artifacts and epoch bundle companions from created drift.
+                if (
+                    name.endswith(".f33")
+                    or name == "fors33-manifest.json"
+                    or is_epoch_upload_companion_basename(name)
+                ):
                     continue
                 rel_path = os.path.join(rel_dir, name) if rel_dir else name
                 norm_rel = rel_path.replace("\\", "/")
@@ -1550,7 +1612,9 @@ def verify_directory_from_manifest(
                 continue
             root_idx = getattr(entry, "root_index", 0)
             root_for_file = roots_resolved[root_idx] if root_idx < len(roots_resolved) else roots_resolved[0]
-            full_path = os.path.join(root_for_file, norm_rel)
+            full_path = resolve_manifest_member_path(
+                root_for_file, norm_rel, basename_fallback=True
+            )
             algo = entry.algo or default_algo
             work_key = f"{root_idx}:{norm_rel}" if len(roots_resolved) > 1 else norm_rel
             yield (work_key, norm_rel, full_path, algo, entry.digest)
@@ -1565,6 +1629,9 @@ def verify_directory_from_manifest(
         if _abort_event.is_set():
             return ("skipped", work_key, rel, algo, expected, None, "abort_event_set", None)
 
+        if not path or not os.path.isfile(path_for_kernel(path)):
+            return ("modified", work_key, rel, algo, expected, None, None, _ERR_INVALID_SEAL_FORMAT)
+
         target_basename = os.path.basename(path)
         sidecar_path = os.path.join(os.path.dirname(path), f"{target_basename}.f33")
         sidecar_target_expected = target_basename
@@ -1572,18 +1639,18 @@ def verify_directory_from_manifest(
         try:
             parsed = _parse_f33(sidecar_path)
         except FileNotFoundError:
-            return ("modified", work_key, rel, algo, expected, expected, None, _ERR_MISSING_SEAL)
+            return ("modified", work_key, rel, algo, expected, None, None, _ERR_MISSING_SEAL)
         except PermissionError:
             return ("skipped", work_key, rel, algo, expected, None, "access_denied", None)
         except ValueError:
-            return ("modified", work_key, rel, algo, expected, expected, None, _ERR_INVALID_SEAL_FORMAT)
+            return ("modified", work_key, rel, algo, expected, None, None, _ERR_INVALID_SEAL_FORMAT)
         except OSError as e:
             return ("skipped", work_key, rel, algo, expected, None, str(e), None)
         except Exception as e:
             return ("skipped", work_key, rel, algo, expected, None, f"sidecar_parse_error: {e}", None)
 
         if parsed.get("target") != sidecar_target_expected:
-            return ("modified", work_key, rel, algo, expected, expected, None, _ERR_INVALID_SEAL_FORMAT)
+            return ("modified", work_key, rel, algo, expected, None, None, _ERR_INVALID_SEAL_FORMAT)
 
         try:
             _validate_key_registry_window(parsed)
@@ -1595,7 +1662,7 @@ def verify_directory_from_manifest(
                 rel,
                 algo,
                 expected,
-                parsed["file_digest"],
+                None,
                 None,
                 f"{_ERR_BAD_SIGNATURE} {e}",
             )
@@ -1609,7 +1676,7 @@ def verify_directory_from_manifest(
                     rel,
                     algo,
                     expected,
-                    parsed["file_digest"],
+                    None,
                     None,
                     tsa_msg or _ERR_TSA_INVALID,
                 )
@@ -1825,6 +1892,596 @@ def verify_directory_from_manifest(
         "lineage_broken_maps_to_severe_exit": lineage_severe,
     }
     return result
+
+
+def verify_directory_from_sidecars(
+    root_dir: str,
+    ignore_patterns: Sequence[str] | None = None,
+    exclude_dirs: Sequence[str] | None = None,
+    follow_symlinks: bool = False,
+    verify_tsa: bool = False,
+    strip_mount_prefix: str = "",
+    regulated_verify: bool = False,
+) -> dict:
+    """Verify directory by walking checksum and .f33 sidecar files."""
+    import fnmatch
+
+    start_ts = datetime.now(timezone.utc)
+    start_monotonic = start_ts.timestamp()
+    root = os.path.abspath(root_dir)
+    ignore_patterns = tuple(list(ignore_patterns or ()) + _load_f33ignore_patterns(root))
+    exclude_dir_set = {d for d in (exclude_dirs or ())}
+
+    def _matches_ignore(path: str) -> bool:
+        return any(fnmatch.fnmatch(path, pat) for pat in ignore_patterns)
+
+    verified: List[dict] = []
+    failed: List[dict] = []
+    skipped: List[dict] = []
+
+    walk_root = path_for_kernel(root)
+    visited_dirs: set[tuple[int, int]] = set()
+    if follow_symlinks:
+        try:
+            st_root = os.stat(walk_root, follow_symlinks=False)
+            visited_dirs.add((st_root.st_dev, st_root.st_ino))
+        except OSError:
+            pass
+    for dirpath, dirnames, filenames in os.walk(walk_root, followlinks=follow_symlinks):
+        if follow_symlinks:
+            keep: list[str] = []
+            for d in dirnames:
+                if d in exclude_dir_set:
+                    continue
+                full = os.path.join(dirpath, d)
+                try:
+                    st = os.stat(path_for_kernel(full), follow_symlinks=True)
+                    key = (st.st_dev, st.st_ino)
+                    if key in visited_dirs:
+                        continue
+                    visited_dirs.add(key)
+                except OSError:
+                    continue
+                keep.append(d)
+            dirnames[:] = keep
+        else:
+            dirnames[:] = [d for d in dirnames if d not in exclude_dir_set]
+        rel_dir = os.path.relpath(dirpath, walk_root)
+        rel_dir = "" if rel_dir == "." else rel_dir
+        for name in filenames:
+            rel_path = os.path.join(rel_dir, name) if rel_dir else name
+            norm_rel = rel_path.replace("\\", "/")
+            if _matches_ignore(norm_rel):
+                continue
+            full_path = os.path.join(dirpath, name)
+            lower = name.lower()
+            if lower.endswith(".f33"):
+                try:
+                    ok, msg = verify_sidecar_f33(
+                        full_path, verify_tsa=verify_tsa, regulated_verify=regulated_verify
+                    )
+                except Exception as e:
+                    skipped.append({"path": norm_rel, "error": str(e)})
+                    continue
+                if ok:
+                    verified.append({"path": norm_rel, "type": "f33"})
+                else:
+                    failed.append({"path": norm_rel, "type": "f33", "reason": msg})
+                continue
+
+            for ext, algo in ((".sha256", "sha256"), (".sha512", "sha512"), (".md5", "md5")):
+                if lower.endswith(ext):
+                    target_rel = norm_rel[: -len(ext)]
+                    target_full = os.path.join(dirpath, name[: -len(ext)])
+                    if not os.path.isfile(path_for_kernel(target_full)):
+                        failed.append(
+                            {
+                                "path": target_rel or norm_rel,
+                                "type": ext.lstrip("."),
+                                "reason": "target_missing",
+                            }
+                        )
+                        break
+                    try:
+                        with open(path_for_kernel(full_path), encoding="utf-8") as sf:
+                            first_line = sf.readline().strip()
+                        expected = first_line.split()[0]
+                    except Exception as e:
+                        skipped.append({"path": norm_rel, "error": str(e)})
+                        break
+                    try:
+                        computed = hash_file(target_full, algo=algo)
+                    except Exception as e:
+                        skipped.append({"path": target_rel, "error": str(e)})
+                        break
+                    if computed.lower() == expected.lower():
+                        verified.append({"path": target_rel, "type": ext.lstrip(".")})
+                    else:
+                        failed.append(
+                            {
+                                "path": target_rel,
+                                "type": ext.lstrip("."),
+                                "expected": expected.lower(),
+                                "computed": computed.lower(),
+                            }
+                        )
+                    break
+
+    modified: List[dict] = []
+    for item in failed:
+        path = str(item.get("path") or item.get("sidecar") or "")
+        reason = str(item.get("reason") or item.get("type") or "verify_failed")
+        row: dict = {"path": path, "status": "modified", "reason": reason}
+        if item.get("expected"):
+            row["expected"] = item["expected"]
+        if item.get("computed"):
+            row["computed"] = item["computed"]
+        modified.append(row)
+
+    root_display = _strip_mount_prefix(root, strip_mount_prefix) if strip_mount_prefix else root
+    end_monotonic = datetime.now(timezone.utc).timestamp()
+    files_scanned = len(verified) + len(failed)
+    return {
+        "schema_version": "0.2",
+        "baseline": "sidecars",
+        "root": root_display,
+        "roots": None,
+        "modified": modified,
+        "created": [],
+        "deleted": [],
+        "mutated_during_verification": [],
+        "skipped": skipped,
+        "files_scanned": files_scanned,
+        "algo_stats": {"default_algo": "sha256"},
+        "timing": {
+            "started_at": start_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "duration_seconds": max(0.0, end_monotonic - start_monotonic),
+        },
+        "lineage": None,
+    }
+
+
+def verify_directory_from_bagit(
+    bag_root: str,
+    strip_mount_prefix: str = "",
+    default_algo: str = "sha256",
+) -> dict:
+    """Verify an on-disk BagIt bag (RFC 8493 subset: complete + checksum valid)."""
+    from manifest_core import BAGIT_PAYLOAD_DIRNAME
+
+    start_ts = datetime.now(timezone.utc)
+    start_monotonic = start_ts.timestamp()
+    layout = discover_bagit_layout(bag_root)
+    if not layout:
+        raise ValueError(
+            "ERR_VERIFY_BAG_INVALID: Folder is not a complete checksum bundle."
+        )
+    if layout.has_fetch_txt:
+        raise ValueError(
+            "ERR_VERIFY_BAG_FETCH_UNSUPPORTED: Remote fetch lists are not supported. "
+            "Verify a complete on-disk bundle."
+        )
+
+    payload_files: set[str] = set()
+    walk_root = path_for_kernel(layout.payload_dir)
+    for dirpath, _dirnames, filenames in os.walk(walk_root):
+        rel_dir = os.path.relpath(dirpath, walk_root)
+        rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
+        for name in filenames:
+            rel_payload = f"{rel_dir}/{name}" if rel_dir else name
+            norm = f"{BAGIT_PAYLOAD_DIRNAME}/{rel_payload}".replace("\\", "/")
+            payload_files.add(norm)
+
+    manifest_sets: list[set[str]] = []
+    checks: list[tuple[str, str, str]] = []
+    for manifest_path, algo in layout.payload_manifests:
+        entries, _roots = load_manifest(manifest_path, fallback_root_dir=layout.bag_root)
+        paths: set[str] = set()
+        for entry in entries.values():
+            norm = str(entry.path or "").replace("\\", "/").lstrip("/")
+            if not norm.startswith(f"{BAGIT_PAYLOAD_DIRNAME}/"):
+                norm = f"{BAGIT_PAYLOAD_DIRNAME}/{norm}"
+            paths.add(norm)
+            digest = str(entry.digest or "").strip()
+            if digest:
+                checks.append((norm, algo, digest.lower()))
+        manifest_sets.append(paths)
+
+    if not manifest_sets:
+        raise ValueError(
+            "ERR_VERIFY_BAG_INCOMPLETE: Bundle is missing payload checksum manifests."
+        )
+    expected = manifest_sets[0]
+    for other in manifest_sets[1:]:
+        if other != expected:
+            raise ValueError(
+                "ERR_VERIFY_BAG_INCOMPLETE: Bundle checksum manifests list different payload files."
+            )
+    if expected != payload_files:
+        raise ValueError(
+            "ERR_VERIFY_BAG_INCOMPLETE: Bundle file listing does not match payload on disk."
+        )
+
+    modified: List[dict] = []
+    created: List[dict] = []
+    deleted: List[dict] = []
+    files_scanned = 0
+    seen_paths: set[str] = set()
+    for norm_rel, algo, expected_digest in checks:
+        if norm_rel in seen_paths:
+            continue
+        seen_paths.add(norm_rel)
+        member = norm_rel[len(BAGIT_PAYLOAD_DIRNAME) + 1 :]
+        full = os.path.join(layout.bag_root, BAGIT_PAYLOAD_DIRNAME, member.replace("/", os.sep))
+        if not os.path.isfile(path_for_kernel(full)):
+            deleted.append({"path": norm_rel, "status": "deleted"})
+            continue
+        try:
+            computed = hash_file(full, algo=algo or default_algo)
+        except OSError as e:
+            modified.append({"path": norm_rel, "status": "modified", "reason": str(e)})
+            continue
+        files_scanned += 1
+        if computed.lower() != expected_digest:
+            modified.append(
+                {
+                    "path": norm_rel,
+                    "status": "modified",
+                    "expected": expected_digest,
+                    "computed": computed.lower(),
+                }
+            )
+
+    root_display = layout.bag_root
+    if strip_mount_prefix:
+        root_display = _strip_mount_prefix(root_display, strip_mount_prefix)
+    end_monotonic = datetime.now(timezone.utc).timestamp()
+    return {
+        "schema_version": "0.2",
+        "baseline": "bagit",
+        "root": root_display,
+        "roots": None,
+        "modified": modified,
+        "created": created,
+        "deleted": deleted,
+        "mutated_during_verification": [],
+        "skipped": [],
+        "files_scanned": files_scanned,
+        "algo_stats": {"default_algo": default_algo},
+        "timing": {
+            "started_at": start_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "duration_seconds": max(0.0, end_monotonic - start_monotonic),
+        },
+        "lineage": None,
+    }
+
+
+def verify_directory_from_checksum_manifest(
+    manifest_path: str,
+    root_dir: str,
+    strip_mount_prefix: str = "",
+    default_algo: str = "sha256",
+) -> dict:
+    """Verify folder files against a standalone GNU/BSD checksum manifest at root."""
+    start_ts = datetime.now(timezone.utc)
+    start_monotonic = start_ts.timestamp()
+    root = os.path.abspath(root_dir)
+    entries, roots = load_manifest(manifest_path, fallback_root_dir=root)
+    base = os.path.abspath(roots[0] if roots else root)
+    modified: List[dict] = []
+    deleted: List[dict] = []
+    files_scanned = 0
+    for entry in entries.values():
+        rel = str(entry.path or "").replace("\\", "/").lstrip("/")
+        full = os.path.join(base, rel.replace("/", os.sep))
+        expected = str(entry.digest or "").strip().lower()
+        algo = infer_algo_from_digest(expected) or default_algo
+        if not os.path.isfile(path_for_kernel(full)):
+            deleted.append({"path": rel, "status": "deleted"})
+            continue
+        try:
+            computed = hash_file(full, algo=algo)
+        except OSError as e:
+            modified.append({"path": rel, "status": "modified", "reason": str(e)})
+            continue
+        files_scanned += 1
+        if computed.lower() != expected:
+            modified.append(
+                {
+                    "path": rel,
+                    "status": "modified",
+                    "expected": expected,
+                    "computed": computed.lower(),
+                }
+            )
+    root_display = _strip_mount_prefix(root, strip_mount_prefix) if strip_mount_prefix else root
+    end_monotonic = datetime.now(timezone.utc).timestamp()
+    return {
+        "schema_version": "0.2",
+        "baseline": "checksum_manifest",
+        "root": root_display,
+        "roots": None,
+        "modified": modified,
+        "created": [],
+        "deleted": deleted,
+        "mutated_during_verification": [],
+        "skipped": [],
+        "files_scanned": files_scanned,
+        "algo_stats": {"default_algo": default_algo},
+        "timing": {
+            "started_at": start_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "duration_seconds": max(0.0, end_monotonic - start_monotonic),
+        },
+        "lineage": None,
+    }
+
+
+_CHECKSUM_MANIFEST_FILENAMES: tuple[str, ...] = (
+    "manifest-sha256.txt",
+    "manifest-sha512.txt",
+    "manifest-md5.txt",
+    "SHA256SUMS",
+    "sha256sum.txt",
+    "checksums.sha256",
+    "checksums.md5",
+)
+
+
+@dataclass(frozen=True)
+class VerifyStrategyPlan:
+    strategy: str
+    root_dir: str
+    manifest_path: str = ""
+
+
+def verify_manifest_bundle_preflight(manifest_path: str, root_dir: str) -> str | None:
+    """Customer-safe layout check before manifest verify. None when the bundle looks verifiable."""
+    root = os.path.abspath(root_dir)
+    try:
+        with open(path_for_kernel(manifest_path), encoding="utf-8") as mf:
+            raw_doc = json.load(mf)
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw_entries = raw_doc.get("entries") if isinstance(raw_doc, dict) else []
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return None
+
+    try:
+        manifest, _roots = load_manifest(manifest_path, fallback_root_dir=root)
+    except Exception:
+        return None
+    if not manifest:
+        return None
+
+    try:
+        names = set(os.listdir(root))
+    except OSError:
+        return None
+
+    manifest_in_folder = any(
+        n.startswith("fors33-manifest") and n.endswith(".json") and not n.endswith(".lock")
+        for n in names
+    )
+    if manifest_in_folder:
+        for n in names:
+            if n.endswith(".jsonl") and f"{n}.f33" not in names:
+                return (
+                    "ERR_VERIFY_BUNDLE_RENAME: A .jsonl file is missing its matching .f33 sidecar. "
+                    "Restore original filenames from your sealed upload."
+                )
+
+    sealed_count = 0
+    resolved_count = 0
+    non_portable_abs = any(
+        isinstance(item, dict)
+        and _is_manifest_abs_path(str(item.get("path") or "").strip())
+        for item in raw_entries
+    )
+
+    for entry in manifest.values():
+        path_raw = str(entry.path or "").strip().replace("\\", "/")
+        if not path_raw:
+            continue
+        digest = str(entry.digest or "").strip()
+        if not digest:
+            continue
+        sealed_count += 1
+        resolved = resolve_manifest_member_path(root, path_raw, basename_fallback=True)
+        if resolved and os.path.isfile(resolved):
+            resolved_count += 1
+            base = os.path.basename(resolved)
+            if f"{base}.f33" not in names:
+                return (
+                    "ERR_VERIFY_BUNDLE_RENAME: A sealed file is missing its matching .f33 sidecar. "
+                    "Restore original filenames from your sealed upload."
+                )
+
+    if non_portable_abs and resolved_count == 0:
+        return (
+            "ERR_VERIFY_MANIFEST_NOT_PORTABLE: This manifest lists seal-environment paths that "
+            "do not match files in this folder. Use fors33-manifest.json from your storage prefix."
+        )
+    if sealed_count > 0 and resolved_count == 0:
+        return (
+            "ERR_VERIFY_BUNDLE_LAYOUT: No sealed files from the manifest were found in this folder. "
+            "Check that filenames match your upload."
+        )
+    return None
+
+
+def _resolve_verify_manifest_path(root_dir: str, hinted_manifest: str = "") -> tuple[str, str | None]:
+    """Return (manifest_path, error_detail). error_detail is customer-safe when set."""
+    root = os.path.abspath(root_dir)
+    candidates: list[str] = []
+    hint = os.path.abspath(str(hinted_manifest or "").strip()) if str(hinted_manifest or "").strip() else ""
+    if hint and os.path.isfile(hint):
+        candidates.append(hint)
+    try:
+        for name in sorted(os.listdir(root)):
+            if not name.startswith("fors33-manifest"):
+                continue
+            if not name.endswith(".json") or name.endswith(".lock"):
+                continue
+            full = os.path.join(root, name)
+            if os.path.isfile(full):
+                candidates.append(os.path.abspath(full))
+    except OSError:
+        pass
+    unique = sorted(set(candidates))
+    if not unique:
+        return "", None
+    chosen = hint if hint and hint in unique else unique[0]
+    preflight = verify_manifest_bundle_preflight(chosen, root)
+    if preflight:
+        return "", preflight
+    return chosen, None
+
+
+def _discover_checksum_manifest_at_root(root: str) -> str:
+    """Return a standalone checksum manifest path at root (non-BagIt)."""
+    root_abs = os.path.abspath(root)
+    if discover_bagit_layout(root_abs):
+        return ""
+    try:
+        names = set(os.listdir(root_abs))
+    except OSError:
+        return ""
+    for candidate in _CHECKSUM_MANIFEST_FILENAMES:
+        if candidate in names:
+            full = os.path.join(root_abs, candidate)
+            if os.path.isfile(full):
+                return os.path.abspath(full)
+    for name in sorted(names):
+        if name.lower() in ("sha256sums", "md5sums"):
+            full = os.path.join(root_abs, name)
+            if os.path.isfile(full):
+                return os.path.abspath(full)
+    return ""
+
+
+def _folder_has_verifiable_sidecars(root: str) -> bool:
+    """True when the folder contains .f33 or checksum sidecars with sibling targets."""
+    root_abs = os.path.abspath(root)
+    try:
+        for _dirpath, _dirnames, filenames in os.walk(root_abs):
+            names = set(filenames)
+            for name in filenames:
+                lower = name.lower()
+                if lower.endswith(".f33"):
+                    return True
+                for ext in (".sha256", ".sha512", ".md5"):
+                    if lower.endswith(ext) and name[: -len(ext)] in names:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+def discover_verify_strategy(
+    root_dir: str, hinted_manifest: str = ""
+) -> tuple[VerifyStrategyPlan | None, str | None]:
+    """Pick verify strategy for root_dir. error_detail is customer-safe when set."""
+    root = os.path.abspath(root_dir)
+    if not os.path.isdir(path_for_kernel(root)):
+        return None, f"Verify root must be a directory: {root}"
+
+    resolved_manifest, resolve_detail = _resolve_verify_manifest_path(root, hinted_manifest)
+    if resolve_detail:
+        return None, resolve_detail
+    if resolved_manifest:
+        return VerifyStrategyPlan("fors33_manifest", root, resolved_manifest), None
+
+    if discover_bagit_layout(root):
+        return VerifyStrategyPlan("bagit", root), None
+
+    checksum_manifest = _discover_checksum_manifest_at_root(root)
+    if checksum_manifest:
+        return VerifyStrategyPlan("checksum_manifest", root, checksum_manifest), None
+
+    if _folder_has_verifiable_sidecars(root):
+        return VerifyStrategyPlan("sidecars", root), None
+
+    return None, None
+
+
+def _verification_report_from_result(result: dict) -> VerificationReport:
+    return VerificationReport(
+        modified=result["modified"],
+        created=result["created"],
+        deleted=result["deleted"],
+        skipped=result["skipped"],
+        mutated=result.get("mutated_during_verification") or [],
+        schema_version=result["schema_version"],
+        baseline=result["baseline"],
+        root=result["root"],
+        roots=result.get("roots"),
+        timing=result["timing"],
+        files_scanned=int(result.get("files_scanned", 0)),
+        lineage=result.get("lineage"),
+    )
+
+
+def execute_verification_sidecars(
+    root_dir: str,
+    ignore_patterns: Sequence[str] | None = None,
+    exclude_dirs: Sequence[str] | None = None,
+    follow_symlinks: bool = False,
+    verify_tsa: bool = False,
+    progress_event_callback: Callable[[dict], None] | None = None,
+    strip_mount_prefix: str = "",
+    regulated_verify: bool = False,
+) -> VerificationReport:
+    """Library entry: verify directory via sidecar files (.f33, .sha256, etc.)."""
+    void = progress_event_callback
+    if void:
+        void({"event": "verify_mode", "mode": "sidecars"})
+    result = verify_directory_from_sidecars(
+        root_dir=root_dir,
+        ignore_patterns=ignore_patterns,
+        exclude_dirs=exclude_dirs,
+        follow_symlinks=follow_symlinks,
+        verify_tsa=verify_tsa,
+        strip_mount_prefix=strip_mount_prefix,
+        regulated_verify=regulated_verify,
+    )
+    return _verification_report_from_result(result)
+
+
+def execute_verification_bagit(
+    bag_root: str,
+    strip_mount_prefix: str = "",
+    default_algo: str = "sha256",
+    progress_event_callback: Callable[[dict], None] | None = None,
+) -> VerificationReport:
+    """Library entry: verify on-disk BagIt bag."""
+    if progress_event_callback:
+        progress_event_callback({"event": "verify_mode", "mode": "bagit"})
+    result = verify_directory_from_bagit(
+        bag_root=bag_root,
+        strip_mount_prefix=strip_mount_prefix,
+        default_algo=default_algo,
+    )
+    return _verification_report_from_result(result)
+
+
+def execute_verification_checksum_manifest(
+    manifest_path: str,
+    root_dir: str,
+    strip_mount_prefix: str = "",
+    default_algo: str = "sha256",
+    progress_event_callback: Callable[[dict], None] | None = None,
+) -> VerificationReport:
+    """Library entry: verify via standalone checksum manifest (GNU/BSD)."""
+    if progress_event_callback:
+        progress_event_callback({"event": "verify_mode", "mode": "checksum_manifest"})
+    result = verify_directory_from_checksum_manifest(
+        manifest_path=manifest_path,
+        root_dir=root_dir,
+        strip_mount_prefix=strip_mount_prefix,
+        default_algo=default_algo,
+    )
+    return _verification_report_from_result(result)
+
 
 
 def execute_verification(
@@ -2184,9 +2841,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "manifest", "sidecars"],
+        choices=["single", "manifest", "sidecars", "bagit", "checksum_manifest", "auto"],
         default="single",
-        help="Verification mode: single (default), manifest, or sidecars.",
+        help="Verification mode: single (default), manifest, sidecars, bagit, checksum_manifest, or auto.",
     )
     # Single-file / URL mode (backwards-compatible)
     parser.add_argument("--url", help="HTTPS presigned URL to download and verify")
@@ -2362,8 +3019,11 @@ def main() -> int:
     if args.directory and args.file:
         print("[ERROR] --directory and --file cannot be used together", file=sys.stderr)
         return EXIT_USAGE
-    if args.directory and args.mode in ("manifest", "sidecars"):
-        print("[ERROR] --directory cannot be used with --mode manifest or --mode sidecars", file=sys.stderr)
+    if args.directory and args.mode in ("manifest", "sidecars", "bagit", "checksum_manifest"):
+        print(
+            "[ERROR] --directory cannot be used with --mode manifest, sidecars, bagit, checksum_manifest, or auto",
+            file=sys.stderr,
+        )
         return EXIT_USAGE
 
     # Handle standalone receipt verification
@@ -2436,6 +3096,38 @@ def main() -> int:
         print(f"[NOTICE]    : {_CTA}", file=sys.stderr)
         return EXIT_OK if (ok or args.warn_only) else EXIT_DRIFT
 
+    if args.mode == "auto":
+        root = os.path.abspath(target_dir or os.getcwd())
+        hinted = str(args.file or "").strip()
+        plan, detail = discover_verify_strategy(root, hinted_manifest=hinted)
+        if detail:
+            print(f"[ERROR] {detail}", file=sys.stderr)
+            return EXIT_SEVERE
+        if plan is None:
+            print(
+                "[ERROR] --mode auto: no fors33 manifest, BagIt layout, checksum manifest, or sidecars found.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if plan.strategy == "fors33_manifest":
+            args.mode = "manifest"
+            args.file = plan.manifest_path
+            if not target_dir:
+                args.root_dir = plan.root_dir
+        elif plan.strategy == "bagit":
+            args.mode = "bagit"
+            if not target_dir:
+                args.root_dir = plan.root_dir
+        elif plan.strategy == "checksum_manifest":
+            args.mode = "checksum_manifest"
+            args.file = plan.manifest_path
+            if not target_dir:
+                args.root_dir = plan.root_dir
+        elif plan.strategy == "sidecars":
+            args.mode = "sidecars"
+            if not target_dir:
+                args.root_dir = plan.root_dir
+
     if args.mode == "manifest":
         if not args.file:
             print("[ERROR] --file must point to the manifest path in --mode manifest.", file=sys.stderr)
@@ -2461,6 +3153,20 @@ def main() -> int:
 
         ignore_list = list(args.ignore_pattern or []) + _load_f33ignore_patterns(root_dir)
         ignore_list.extend(["*.f33", "fors33-manifest.json", "**/fors33-manifest.json"])
+        ignore_list.extend(
+            [
+                "metrics-template.json",
+                "**/metrics-template.json",
+                "integrity_provenance.json",
+                "integrity_provenance_*.json",
+                "epoch_attestation.json",
+                "epoch_attestation.sig",
+                "epoch_attestation_public.pem",
+                "epoch_attestation_*.json",
+                "epoch_attestation_*.sig",
+                "epoch_attestation_*_public.pem",
+            ]
+        )
         try:
             worker_n = resolve_manifest_worker_count(args.workers)
         except ValueError as e:
@@ -2558,127 +3264,129 @@ def main() -> int:
             return EXIT_OK
         return exit_code
 
+
+    if args.mode == "bagit":
+        root = os.path.abspath(target_dir or args.file or os.getcwd())
+        try:
+            report = execute_verification_bagit(
+                root,
+                strip_mount_prefix=args.strip_mount_prefix or "",
+                default_algo=args.algo or "sha256",
+            )
+            result = {
+                "schema_version": report.schema_version,
+                "baseline": report.baseline,
+                "root": report.root,
+                "modified": report.modified,
+                "created": report.created,
+                "deleted": report.deleted,
+                "mutated_during_verification": report.mutated,
+                "skipped": report.skipped,
+                "timing": report.timing,
+                "files_scanned": report.files_scanned,
+            }
+        except Exception as e:
+            print(f"BagIt verification failed: {e}", file=sys.stderr)
+            return EXIT_SEVERE
+
+        modified = result.get("modified") or []
+        created = result.get("created") or []
+        deleted = result.get("deleted") or []
+        mutated = result.get("mutated_during_verification") or []
+        drift_detected = bool(modified or created or deleted or mutated)
+        summary_line = (
+            f"Baseline: bagit | Root: {root} | "
+            f"Modified: {len(modified)} | Created: {len(created)} | Deleted: {len(deleted)}"
+        )
+        if args.format == "json":
+            if args.emit_report:
+                result["summary"] = summary_line
+                print(summary_line, file=sys.stderr)
+            print(json.dumps(result))
+        else:
+            print(summary_line, file=sys.stderr)
+        exit_code = EXIT_DRIFT if drift_detected else EXIT_OK
+        if args.warn_only:
+            return EXIT_OK
+        return exit_code
+
+    if args.mode == "checksum_manifest":
+        if not args.file:
+            print(
+                "[ERROR] --file must point to the checksum manifest in --mode checksum_manifest.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        manifest_path = args.file
+        root_dir = target_dir or os.path.dirname(os.path.abspath(manifest_path)) or "."
+        try:
+            report = execute_verification_checksum_manifest(
+                manifest_path=manifest_path,
+                root_dir=root_dir,
+                strip_mount_prefix=args.strip_mount_prefix or "",
+                default_algo=args.algo or "sha256",
+            )
+            result = {
+                "schema_version": report.schema_version,
+                "baseline": report.baseline,
+                "root": report.root,
+                "modified": report.modified,
+                "created": report.created,
+                "deleted": report.deleted,
+                "mutated_during_verification": report.mutated,
+                "skipped": report.skipped,
+                "timing": report.timing,
+                "files_scanned": report.files_scanned,
+            }
+        except Exception as e:
+            print(f"Checksum manifest verification failed: {e}", file=sys.stderr)
+            return EXIT_SEVERE
+
+        modified = result.get("modified") or []
+        created = result.get("created") or []
+        deleted = result.get("deleted") or []
+        mutated = result.get("mutated_during_verification") or []
+        drift_detected = bool(modified or created or deleted or mutated)
+        summary_line = (
+            f"Baseline: checksum_manifest | Manifest: {manifest_path} | Root: {root_dir} | "
+            f"Modified: {len(modified)} | Created: {len(created)} | Deleted: {len(deleted)}"
+        )
+        if args.format == "json":
+            if args.emit_report:
+                result["summary"] = summary_line
+                print(summary_line, file=sys.stderr)
+            print(json.dumps(result))
+        else:
+            print(summary_line, file=sys.stderr)
+        exit_code = EXIT_DRIFT if drift_detected else EXIT_OK
+        if args.warn_only:
+            return EXIT_OK
+        return exit_code
+
     if args.mode == "sidecars":
-        # Directory-wide sidecar verification: .sha256/.sha512/.md5/.f33
-        root = target_dir or args.file or os.getcwd()
-        root = os.path.abspath(root)
-        ignore_patterns = list(args.ignore_pattern or []) + _load_f33ignore_patterns(root)
-        exclude_dirs = set(args.exclude_dir or [])
-
-        import fnmatch
-
-        verified = []
-        failed = []
-        skipped = []
-
-        def _matches_ignore(path: str) -> bool:
-            return any(fnmatch.fnmatch(path, pat) for pat in ignore_patterns)
-
-        walk_root = path_for_kernel(os.path.abspath(root))
-        visited_dirs: set[tuple[int, int]] = set()
-        if args.follow_symlinks:
-            try:
-                st_root = os.stat(walk_root, follow_symlinks=False)
-                visited_dirs.add((st_root.st_dev, st_root.st_ino))
-            except OSError:
-                pass
-        for dirpath, dirnames, filenames in os.walk(
-            walk_root, followlinks=args.follow_symlinks
-        ):
-            if args.follow_symlinks:
-                keep = []
-                for d in dirnames:
-                    if d in exclude_dirs:
-                        continue
-                    full = os.path.join(dirpath, d)
-                    try:
-                        st = os.stat(path_for_kernel(full), follow_symlinks=True)
-                        key = (st.st_dev, st.st_ino)
-                        if key in visited_dirs:
-                            continue
-                        visited_dirs.add(key)
-                    except OSError:
-                        continue
-                    keep.append(d)
-                dirnames[:] = keep
-            else:
-                dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
-            rel_dir = os.path.relpath(dirpath, walk_root)
-            rel_dir = "" if rel_dir == "." else rel_dir
-            for name in filenames:
-                rel_path = os.path.join(rel_dir, name) if rel_dir else name
-                norm_rel = rel_path.replace("\\", "/")
-                if _matches_ignore(norm_rel):
-                    continue
-                full_path = os.path.join(dirpath, name)
-                lower = name.lower()
-                if lower.endswith(".f33"):
-                    try:
-                        ok, msg = verify_sidecar_f33(full_path, verify_tsa=args.verify_tsa)
-                    except Exception as e:
-                        skipped.append({"sidecar": norm_rel, "error": str(e)})
-                        continue
-                    if ok:
-                        verified.append({"sidecar": norm_rel, "type": "f33"})
-                    else:
-                        failed.append({"sidecar": norm_rel, "type": "f33", "reason": msg})
-                    continue
-
-                for ext, algo in ((".sha256", "sha256"), (".sha512", "sha512"), (".md5", "md5")):
-                    if lower.endswith(ext):
-                        target_rel = norm_rel[: -len(ext)]
-                        target_full = os.path.join(dirpath, name[: -len(ext)])
-                        if not os.path.isfile(path_for_kernel(target_full)):
-                            failed.append(
-                                {
-                                    "sidecar": norm_rel,
-                                    "type": ext.lstrip("."),
-                                    "reason": "target_missing",
-                                }
-                            )
-                            break
-                        try:
-                            with open(path_for_kernel(full_path), encoding="utf-8") as sf:
-                                first_line = sf.readline().strip()
-                            expected = first_line.split()[0]
-                        except Exception as e:
-                            skipped.append({"sidecar": norm_rel, "error": str(e)})
-                            break
-                        try:
-                            computed = hash_file(target_full, algo=algo)
-                        except Exception as e:
-                            skipped.append({"sidecar": norm_rel, "error": str(e)})
-                            break
-                        if computed.lower() == expected.lower():
-                            verified.append(
-                                {
-                                    "sidecar": norm_rel,
-                                    "target": target_rel,
-                                    "type": ext.lstrip("."),
-                                }
-                            )
-                        else:
-                            failed.append(
-                                {
-                                    "sidecar": norm_rel,
-                                    "target": target_rel,
-                                    "type": ext.lstrip("."),
-                                    "expected": expected.lower(),
-                                    "computed": computed.lower(),
-                                }
-                            )
-                        break
-
+        root = os.path.abspath(target_dir or args.file or os.getcwd())
+        report = execute_verification_sidecars(
+            root,
+            ignore_patterns=args.ignore_pattern,
+            exclude_dirs=args.exclude_dir,
+            follow_symlinks=args.follow_symlinks,
+            verify_tsa=args.verify_tsa,
+            strip_mount_prefix=args.strip_mount_prefix or "",
+        )
+        failed = report.modified or []
+        skipped = report.skipped or []
+        files_scanned = int(report.files_scanned or 0)
+        verified_count = max(0, files_scanned - len(failed))
         result = {
-            "schema_version": "0.1",
-            "root": root,
-            "verified": verified,
+            "schema_version": report.schema_version,
+            "root": report.root or root,
+            "verified": [],
             "failed": failed,
             "skipped": skipped,
         }
 
         summary_line = (
-            f"Root: {root} | Verified sidecars: {len(verified)} | "
+            f"Root: {root} | Verified sidecars: {verified_count} | "
             f"Failed: {len(failed)} | Skipped: {len(skipped)}"
         )
 
@@ -2692,9 +3400,9 @@ def main() -> int:
         else:
             print(summary_line, file=sys.stderr)
 
-        exit_code = EXIT_DRIFT if failed else EXIT_OK
+        exit_code = 1 if failed else 0
         if args.warn_only:
-            return EXIT_OK
+            return 0
         return exit_code
 
     # Default: single mode URL/file verification
@@ -2757,6 +3465,41 @@ def main() -> int:
 
     print("[ERROR] Must provide either --url or --file", file=sys.stderr)
     return EXIT_USAGE
+
+
+def verify_epoch_attestation(
+    attestation_path: str,
+    sig_path: str,
+    public_key_pem: bytes | str,
+) -> tuple[bool, str]:
+    """Verify DSSE-shaped epoch attestation JSON and detached Ed25519 signature."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    try:
+        with open(path_for_kernel(attestation_path), "rb") as af:
+            payload = af.read()
+        with open(path_for_kernel(sig_path), "rb") as sf:
+            sig = sf.read()
+    except OSError as e:
+        return False, f"read failed: {e}"
+    try:
+        doc = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return False, f"invalid JSON: {e}"
+    if doc.get("payloadType") != "application/vnd.in-toto+json":
+        return False, "unexpected payloadType"
+    if not isinstance(doc.get("payload"), str):
+        return False, "missing payload"
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, bytes) else public_key_pem.encode("utf-8")
+        key = serialization.load_pem_public_key(pem)
+        if not isinstance(key, Ed25519PublicKey):
+            return False, "public key is not Ed25519"
+        key.verify(sig, hashlib.sha256(payload).digest())
+    except Exception as e:
+        return False, f"signature invalid: {e}"
+    return True, "epoch attestation signature valid"
 
 
 if __name__ == "__main__":

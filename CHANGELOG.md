@@ -2,7 +2,46 @@
 
 All notable changes to fors33-verifier are documented here.
 
-## [0.9.1] - 2026-05-10
+## [v0.9.3] - 2026-07-02
+
+### Added
+
+- **`discover_verify_strategy`**: opt-in layout discovery for auditor workflows (`fors33_manifest`, `bagit`, `checksum_manifest`, `sidecars`).
+- **CLI `--mode auto`**: picks verify strategy from folder layout (default `single` unchanged).
+- **`verify_manifest_bundle_preflight`**: fail-fast bundle rename/layout/portability checks before manifest hash walk (`ERR_VERIFY_BUNDLE_RENAME`, `ERR_VERIFY_MANIFEST_NOT_PORTABLE`, `ERR_VERIFY_BUNDLE_LAYOUT`).
+
+### Fixed
+
+- **CLI `--mode sidecars`**: delegates to `execute_verification_sidecars` (library wrapper) instead of calling `verify_directory_from_sidecars` directly.
+
+### Unchanged
+
+- **`regulated_verify`** on `verify_sidecar_f33` remains a no-op stub in OSS (regulated EUTL TSA stays extension-only).
+- **Receipt JSON**: `receipt_to_json` keeps `dataclasses.asdict` including null operator fields for stable round-trip with extension receipts.
+
+## [v0.9.2] - 2026-07-02
+
+### Added
+
+- **BagIt verify (RFC 8493 minimal subset):** `discover_bagit_layout` in `manifest_core.py`; `verify_directory_from_bagit`, `execute_verification_bagit`; CLI `--mode bagit`.
+- **Checksum manifest verify:** `verify_directory_from_checksum_manifest`, `execute_verification_checksum_manifest` (GNU/BSD standalone manifests); CLI `--mode checksum_manifest`.
+- **Sidecar directory verify:** `verify_directory_from_sidecars`, `execute_verification_sidecars`; CLI `--mode sidecars` delegates to library walk.
+- **`is_epoch_upload_companion_basename`** in `hash_core.py` (epoch bundle companion skips in manifest drift walk and CLI ignore globs).
+- **`source_fingerprint_from_predicate`** for TLS `source_fingerprint_struct`-only sidecars (websocket seal parity).
+- **`verify_epoch_attestation`** standalone DSSE epoch bundle check.
+- **Key registry `revoked_at`:** signatures on or after revocation time fail registry window validation.
+- **Fixture:** `test-data/bagit-minimal/` for CLI spot-check.
+
+### Changed
+
+- **Unified release semver**: Git tags, PyPI, `workflow_dispatch` `version`, and Docker images all use `vX.Y.Z` (e.g. `v0.9.2`, `:v0.9.2`). Bare `X.Y.Z` is rejected on Docker publish workflows.
+- Manifest verify worker: pre-hash seal/signature failures emit `computed: null` (not duplicate expected digest); `resolve_manifest_member_path(..., basename_fallback=True)` for member resolution.
+
+### Unchanged
+
+- **`legacy_manifest_json`**, **`created_paths_format`**, and manifest verification kwargs from v0.9.1.
+
+## [v0.9.1] - 2026-05-10
 
 ### Added
 
@@ -121,7 +160,7 @@ All notable changes to fors33-verifier are documented here.
 ### Changed
 
 - Startup compliance copy aligned with reference verifier notice lines.
-- **`publish-fors33-verifier`**: Docker publish is **manual `workflow_dispatch` only**, with required **`version`** and **`push_latest`** inputs (same model as `fors33-scanner`); automatic runs on git tag push were removed.
+- **`publish-fors33-verifier`**: Docker publish is **manual `workflow_dispatch` only**, with required **`version`** = `vX.Y.Z` and **`push_latest`** inputs (bare `X.Y.Z` rejected); automatic runs on git tag push were removed.
 
 ## [0.4.0] - 2026-03-24
 

@@ -1,20 +1,37 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.9.1-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-v0.9.3-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.9.1%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-v0.9.3%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
 Standalone verification for attested data segments and general-purpose file integrity baselines. For machine-readable context (LLMs, crawlers), see [LLM_CONTEXT.md](LLM_CONTEXT.md). Confirm that a data segment or directory tree matches published hashes.
 
-> Warning: FORS33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md).
+> Warning: Fors33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md).
 
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
 
-### 0.9.1 (2026-05-10)
+### v0.9.3 (2026-07-02)
+
+- **Auto verify mode:** `--mode auto` and `discover_verify_strategy(root_dir)` pick manifest, BagIt, checksum manifest, or sidecar verification from folder layout.
+- **Manifest bundle preflight:** rename/layout/portability checks before hash walk (`ERR_VERIFY_BUNDLE_*`).
+- **Sidecar CLI:** `--mode sidecars` delegates to `execute_verification_sidecars`.
+
+### v0.9.2 (2026-07-02)
+
+- **BagIt verify:** `--mode bagit` and `execute_verification_bagit` for on-disk RFC 8493 minimal subset (complete bags only; `fetch.txt` fails closed).
+- **Checksum manifest verify:** `--mode checksum_manifest` and `execute_verification_checksum_manifest` for GNU/BSD manifests at folder root.
+- **Sidecar verify:** `--mode sidecars` delegates to `execute_verification_sidecars`.
+- **Epoch companions:** `is_epoch_upload_companion_basename` skips observability adjuncts from manifest created-drift noise.
+- **TLS struct fingerprints:** `source_fingerprint_struct`-only predicates canonicalize like the L3dgr extension.
+- **`verify_epoch_attestation`:** standalone DSSE epoch bundle signature check.
+- **Registry revocation:** `revoked_at` honored in `F33_KEY_REGISTRY_PATH` window validation.
+- **Unified release semver:** Git tags, PyPI, `workflow_dispatch` `version`, and Docker images use `vX.Y.Z`.
+
+### v0.9.1 (2026-05-10)
 
 - **Manifest JSON compatibility**: Keyword parameters on **`verify_directory_from_manifest`** / **`execute_verification`**, CLI **`--legacy-manifest-json`**, or env **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** opt into pre-0.9.0-style output (record-and-continue on manifest compromise, stripped **`created[].path`**, **`modified[].reason`**, broken lineage does not force exit 3 alone). Defaults stay extension-parity.
 
@@ -52,7 +69,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.9.1`) and **`push_latest`**—it does **not** run automatically on git tags.
+Releases are published to PyPI manually using `python -m build` and `twine upload` with `vX.Y.Z` in `pyproject.toml`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with **`version`** = `vX.Y.Z` (e.g. `v0.9.2`) and **`push_latest`** — bare `X.Y.Z` is **rejected**. It does **not** run automatically on git tags.
 
 ## Usage
 
@@ -92,9 +109,36 @@ Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emi
 
 **Sidecar verification:**
 ```bash
-fors33-verifier --mode sidecars --file ./root --format json
+fors33-verifier --mode sidecars --root ./root --format json
 ```
 Walk the tree and verify `.f33`, `.sha256`, `.sha512`, and `.md5` sidecars in place.
+
+**BagIt verification:**
+```bash
+fors33-verifier --mode bagit --root ./bag-folder --format json
+```
+Verify a complete on-disk BagIt bag (RFC 8493 minimal subset). Remote `fetch.txt` is unsupported and fails closed.
+
+**Checksum manifest verification:**
+```bash
+fors33-verifier --mode checksum_manifest --file ./manifest-sha256.txt --root ./folder --format json
+```
+Verify files under `--root` against a standalone GNU/BSD checksum manifest (no `bagit.txt`).
+
+**Auto discovery (auditor workflows):**
+```bash
+fors33-verifier --mode auto --root ./sealed-bundle-folder --format json
+```
+Inspects the folder for `fors33-manifest*.json`, BagIt layout, standalone checksum manifests, or verifiable sidecars and runs the matching mode. Explicit `--mode manifest|bagit|checksum_manifest|sidecars` remains the default integration path.
+
+| Layout signal | Auto-selected mode |
+|---|---|
+| `fors33-manifest*.json` at root | `manifest` |
+| `bagit.txt` + payload manifests | `bagit` |
+| `manifest-sha256.txt` / `SHA256SUMS` (non-BagIt) | `checksum_manifest` |
+| `.f33` or checksum sidecars with sibling targets | `sidecars` |
+
+For sealed upload bundles exported from a Fors33 workbench, copy the storage prefix locally (manifest, data files, and matching `.f33` sidecars) then run `--mode auto` or pick the explicit mode above. Set `F33_KEY_REGISTRY_PATH` when verifying operator-registry-gated signatures. Use `--verify-tsa` for RFC 3161 timestamp blocks in JSON `.f33` sidecars (OSS path does not enforce regulated EUTL trust anchors).
 
 Optional TSA verification for JSON `.f33` sidecars:
 ```bash
@@ -165,7 +209,7 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 ## GitHub Action (CI/CD)
 
-Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
+Use **Fors33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
 The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:0.9.1`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
@@ -186,7 +230,7 @@ For URL verification (presigned URLs only; no file uploads):
     expected-hash: 'abc123...'
 ```
 
-The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructure. Procure licensing at [fors33.com](https://fors33.com) or [GitHub Marketplace](https://github.com/marketplace).
+The Fors33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructure. Procure licensing at [fors33.com](https://fors33.com) or [GitHub Marketplace](https://github.com/marketplace).
 
 ## Docker
 

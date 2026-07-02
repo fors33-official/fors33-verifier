@@ -390,3 +390,31 @@ def default_dpk_worker_count() -> int:
         except ValueError:
             pass
     return w
+
+
+# Epoch upload bundle companions (S3 PutObject basenames + dated live-root variants).
+_EPOCH_UPLOAD_COMPANION_EXACT: frozenset[str] = frozenset(
+    {
+        "metrics-template.json",
+        "integrity_provenance.json",
+        "epoch_attestation.json",
+        "epoch_attestation.sig",
+        "epoch_attestation_public.pem",
+    }
+)
+
+
+def is_epoch_upload_companion_basename(name: str) -> bool:
+    """True when basename is a non-sealed epoch bundle companion (observability or audit adjunct)."""
+    base = os.path.basename(str(name or "").strip())
+    if not base:
+        return False
+    if base in _EPOCH_UPLOAD_COMPANION_EXACT:
+        return True
+    if base.startswith("integrity_provenance_") and base.endswith(".json"):
+        return True
+    if base.startswith("epoch_attestation_") and (
+        base.endswith(".json") or base.endswith(".sig") or base.endswith("_public.pem")
+    ):
+        return True
+    return False

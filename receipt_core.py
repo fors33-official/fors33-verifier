@@ -13,7 +13,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
@@ -38,6 +38,8 @@ class VerificationReceipt:
     file_count: int
     total_bytes: int
     algorithm: str
+    operator_key_id: Optional[str] = None
+    operator_subject: Optional[str] = None
 
 
 def generate_verification_receipt(
@@ -45,6 +47,9 @@ def generate_verification_receipt(
     public_key_pem: str,
     private_key: ed25519.Ed25519PrivateKey,
     target_path: str,
+    *,
+    operator_key_id: Optional[str] = None,
+    operator_subject: Optional[str] = None,
 ) -> VerificationReceipt:
     """Produce a standalone receipt from manifest entry dicts (digest / hash keys)."""
     entry_digests: List[str] = []
@@ -81,6 +86,10 @@ def generate_verification_receipt(
         "total_bytes": total_bytes,
         "algorithm": "sha256",
     }
+    if operator_key_id:
+        receipt_payload["operator_key_id"] = operator_key_id
+    if operator_subject:
+        receipt_payload["operator_subject"] = operator_subject
 
     payload_bytes = json.dumps(receipt_payload, sort_keys=True).encode("utf-8")
     signature = private_key.sign(payload_bytes)
@@ -95,6 +104,8 @@ def generate_verification_receipt(
         file_count=file_count,
         total_bytes=total_bytes,
         algorithm="sha256",
+        operator_key_id=operator_key_id or None,
+        operator_subject=operator_subject or None,
     )
 
 
@@ -156,6 +167,10 @@ def verify_receipt(receipt_path: str, dataset_path: str) -> bool:
         "total_bytes": total_bytes,
         "algorithm": algorithm,
     }
+    if receipt_data.get("operator_key_id"):
+        payload_for_verification["operator_key_id"] = receipt_data["operator_key_id"]
+    if receipt_data.get("operator_subject"):
+        payload_for_verification["operator_subject"] = receipt_data["operator_subject"]
 
     try:
         public_key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
