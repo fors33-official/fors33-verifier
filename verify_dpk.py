@@ -93,6 +93,15 @@ _COMPLIANCE_NOTICE_LINES = (
 print_lock = threading.Lock()
 
 
+class VerifyCancelled(RuntimeError):
+    """Operator cancelled an in-flight verify (cooperative stop)."""
+
+
+def _check_verify_cancel(should_cancel: Callable[[], bool] | None) -> None:
+    if should_cancel is not None and should_cancel():
+        raise VerifyCancelled("Cancelled by operator")
+
+
 @dataclass
 class BatchVerificationResult:
     """Result of a single package verification in batch mode."""
@@ -890,24 +899,19 @@ def _parse_f33(sidecar_path: str) -> dict:
     tsa_public_key_hex_l = tsa_public_key_hex.lower() if isinstance(tsa_public_key_hex, str) else None
     tsa_signature_hex_l = tsa_signature_hex.lower() if isinstance(tsa_signature_hex, str) else None
 
-    # TSA token parsing: check new format (predicate.tsa.response_token) first, fallback to old format
-    rfc3161_b64 = None
-    tsa_obj = predicate.get("tsa")
-    if isinstance(tsa_obj, dict):
-        # New format: predicate.tsa.response_token
-        nested = tsa_obj.get("response_token")
-        if isinstance(nested, str) and nested.strip():
-            rfc3161_b64 = nested.strip()
-        # Fallback to old format: predicate.tsa.rfc3161_token_b64
-        if not rfc3161_b64:
-            nested_legacy = tsa_obj.get("rfc3161_token_b64")
-            if isinstance(nested_legacy, str) and nested_legacy.strip():
-                rfc3161_b64 = nested_legacy.strip()
-    
-    # Legacy top-level format: predicate.rfc3161_token_b64
+    # TSA token: match L3dgr order (top-level rfc3161, nested rfc3161, then response_token).
+    rfc3161_raw = predicate.get("rfc3161_token_b64")
+    rfc3161_b64 = rfc3161_raw.strip() if isinstance(rfc3161_raw, str) and rfc3161_raw.strip() else None
     if not rfc3161_b64:
-        rfc3161_raw = predicate.get("rfc3161_token_b64")
-        rfc3161_b64 = rfc3161_raw.strip() if isinstance(rfc3161_raw, str) and rfc3161_raw.strip() else None
+        tsa_obj = predicate.get("tsa")
+        if isinstance(tsa_obj, dict):
+            nested = tsa_obj.get("rfc3161_token_b64")
+            if isinstance(nested, str) and nested.strip():
+                rfc3161_b64 = nested.strip()
+            else:
+                response_token = tsa_obj.get("response_token")
+                if isinstance(response_token, str) and response_token.strip():
+                    rfc3161_b64 = response_token.strip()
 
     if digest_algo == "sha512":
         if len(file_hash_l) != 128 or any(c not in "0123456789abcdef" for c in file_hash_l):
@@ -1235,11 +1239,129 @@ def _cms_assert_timestamping_eku(signer_cert) -> None:
         raise ValueError("TSA_EKU_MISSING: signer cert lacks id-kp-timeStamping EKU") from None
 
 
+def _pki_status_granted(status_field) -> bool:
+    """Return True when PKIStatus is granted (0 or asn1crypto native 'granted')."""
+    if status_field is None:
+        return False
+    native = getattr(status_field, "native", status_field)
+    if isinstance(native, str):
+        lowered = native.strip().lower()
+        if lowered in ("granted", "0"):
+            return True
+        try:
+            return int(native, 10) == 0
+        except (TypeError, ValueError):
+            return False
+    try:
+        return int(native) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+_TSA_TRUST_ANCHORS_CACHE: list[object] | None = None
+
+
+def _reset_tsa_trust_anchor_cache() -> None:
+    """Test helper: clear cached TSA trust anchors."""
+    global _TSA_TRUST_ANCHORS_CACHE
+    _TSA_TRUST_ANCHORS_CACHE = None
+
+
+def _load_pem_x509(path: str, crypto_x509, default_backend) -> object | None:
+    try:
+        with open(path, "rb") as fh:
+            pem_data = fh.read()
+    except OSError:
+        return None
+    try:
+        return crypto_x509.load_pem_x509_certificate(pem_data, default_backend())
+    except Exception:
+        return None
+
+
+def _load_tsa_trust_anchor_certs() -> list[object]:
+    """Load pinned TSA trust anchors from bundle dir and/or comma-separated PEM paths.
+
+    OSS inlines PEM reads (no tsa_trust package). Operator supplies PEMs via
+    F33_TSA_TRUST_BUNDLE and/or F33_TSA_TRUST_ANCHORS.
+    """
+    global _TSA_TRUST_ANCHORS_CACHE
+    if _TSA_TRUST_ANCHORS_CACHE is not None:
+        return _TSA_TRUST_ANCHORS_CACHE
+    from cryptography import x509 as crypto_x509
+    from cryptography.hazmat.backends import default_backend
+
+    anchors: list[object] = []
+    bundle_dir = os.environ.get("F33_TSA_TRUST_BUNDLE", "").strip()
+    if bundle_dir and os.path.isdir(bundle_dir):
+        try:
+            names = sorted(os.listdir(bundle_dir))
+        except OSError:
+            names = []
+        for name in names:
+            lower = name.lower()
+            if not (lower.endswith(".pem") or lower.endswith(".crt") or lower.endswith(".cer")):
+                continue
+            cert = _load_pem_x509(os.path.join(bundle_dir, name), crypto_x509, default_backend)
+            if cert is not None:
+                anchors.append(cert)
+
+    raw = os.environ.get("F33_TSA_TRUST_ANCHORS", "").strip()
+    if raw:
+        for part in raw.split(","):
+            path = part.strip()
+            if not path or not os.path.isfile(path):
+                continue
+            cert = _load_pem_x509(path, crypto_x509, default_backend)
+            if cert is not None:
+                anchors.append(cert)
+    _TSA_TRUST_ANCHORS_CACHE = anchors
+    return anchors
+
+
+def _cert_fingerprint_sha256(cert_crypto) -> bytes:
+    from cryptography.hazmat.primitives import hashes
+
+    return cert_crypto.fingerprint(hashes.SHA256())
+
+
+def _cert_chains_to_anchor(leaf_crypto, pool: list, anchor_crypto) -> bool:
+    if _cert_fingerprint_sha256(leaf_crypto) == _cert_fingerprint_sha256(anchor_crypto):
+        return True
+    issuer = leaf_crypto.issuer
+    for candidate in pool:
+        if candidate.subject == issuer:
+            if _cert_chains_to_anchor(candidate, pool, anchor_crypto):
+                return True
+    return False
+
+
+def _cms_assert_eutl_trust_anchor(signer_cert, all_certs: Sequence[object]) -> None:
+    """Regulated-only: require TSA signer chain to a configured trust anchor."""
+    from cryptography import x509 as crypto_x509
+    from cryptography.hazmat.backends import default_backend
+
+    anchors = _load_tsa_trust_anchor_certs()
+    if not anchors:
+        raise ValueError(
+            "TSA_TRUST_ANCHORS_UNCONFIGURED: set F33_TSA_TRUST_BUNDLE or F33_TSA_TRUST_ANCHORS"
+        )
+    signer_crypto = crypto_x509.load_der_x509_certificate(signer_cert.dump(), default_backend())
+    pool = [
+        crypto_x509.load_der_x509_certificate(c.dump(), default_backend()) for c in all_certs
+    ]
+    for anchor in anchors:
+        if _cert_chains_to_anchor(signer_crypto, pool, anchor):
+            return
+    raise ValueError("TSA_TRUST_ANCHOR_FAILED: signer cert does not chain to a pinned anchor")
+
+
 def _verify_rfc3161_token_b64(
     b64s: str,
     canonical_payload: bytes,
     *,
     expected_nonce_hex: str | None = None,
+    regulated_verify: bool = False,
 ) -> None:
     """Decode RFC 3161 TimeStampResp; verify imprint, optional TSTInfo nonce match, EKU, CMS."""
     try:
@@ -1249,9 +1371,10 @@ def _verify_rfc3161_token_b64(
 
     raw = base64.standard_b64decode(b64s)
     resp = tsp_mod.TimeStampResp.load(raw)
-    st = resp["status"]["status"].native
-    if int(st) != 0:
-        raise ValueError(f"TSA status not granted (status={int(st)})")
+    st = resp["status"]["status"]
+    if not _pki_status_granted(st):
+        st_native = getattr(st, "native", st)
+        raise ValueError(f"TSA status not granted (status={st_native!r})")
 
     tst_ci = resp["time_stamp_token"]
     if tst_ci is None:
@@ -1288,19 +1411,30 @@ def _verify_rfc3161_token_b64(
         raise ValueError("no certificates in timestamp token")
     signer_cert = _cms_match_signer_cert(signer_infos[0], certs)
     _cms_assert_timestamping_eku(signer_cert)
+    if regulated_verify:
+        _cms_assert_eutl_trust_anchor(signer_cert, certs)
     _cms_verify_signer_info(signer_infos[0], signer_cert, signed_data)
 
 
-def _verify_tsa(parsed: dict, canonical_payload_bytes: bytes) -> tuple[bool, str]:
+def _verify_tsa(
+    parsed: dict,
+    canonical_payload_bytes: bytes,
+    *,
+    regulated_verify: bool = False,
+) -> tuple[bool, str]:
     """Verify TSA when --verify-tsa: RFC 3161 token or legacy Ed25519 predicate.tsa; fail-closed if neither."""
     rfc = parsed.get("rfc3161_token_b64")
     if isinstance(rfc, str) and rfc.strip():
         nonce_hex = parsed.get("nonce_hex")
+        nonce_s = str(nonce_hex).strip() if isinstance(nonce_hex, str) and nonce_hex else ""
+        if regulated_verify and not nonce_s:
+            return False, "TSA_NONCE_REQUIRED: regulated verification requires nonce_hex in predicate"
         try:
             _verify_rfc3161_token_b64(
                 rfc.strip(),
                 canonical_payload_bytes,
-                expected_nonce_hex=str(nonce_hex).strip() if isinstance(nonce_hex, str) and nonce_hex else None,
+                expected_nonce_hex=nonce_s or None,
+                regulated_verify=regulated_verify,
             )
             return True, "tsa_rfc3161_verified"
         except Exception as e:
@@ -1377,7 +1511,6 @@ def verify_sidecar_f33(
     regulated_verify: bool = False,
 ) -> tuple[bool, str]:
     """Verify .f33 sidecar: resolve target, hash range, check digest and Ed25519. Returns (success, message)."""
-    _ = regulated_verify  # OSS stub: regulated TSA path is extension-only.
     try:
         parsed = _parse_f33(sidecar_path)
     except ValueError:
@@ -1392,7 +1525,7 @@ def verify_sidecar_f33(
     except Exception as e:
         return False, f"{_ERR_BAD_SIGNATURE} {e}"
     if verify_tsa:
-        tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
+        tsa_ok, tsa_msg = _verify_tsa(parsed, payload, regulated_verify=regulated_verify)
         if not tsa_ok:
             return False, tsa_msg
     algo = str(parsed.get("digest_algo") or "sha256").lower()
@@ -1478,6 +1611,7 @@ def verify_directory_from_manifest(
     created_paths_format: Literal["extension", "stripped_filtered"] = "extension",
     manifest_modified_include_reason: bool = False,
     lineage_broken_maps_to_severe_exit: bool = True,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """
     Verify a directory tree against a manifest.
@@ -1501,6 +1635,8 @@ def verify_directory_from_manifest(
         broken lineage alone to severe exit (drift-only line).
     """
     import fnmatch
+
+    _check_verify_cancel(should_cancel)
 
     compromise_action, created_fmt, mod_inc_reason, lineage_severe = _resolve_manifest_verify_compat_kwargs(
         legacy_manifest_json=legacy_manifest_json,
@@ -1785,6 +1921,7 @@ def verify_directory_from_manifest(
         for kind, wk, rel, algo, expected, computed, err, status in executor.map(
             _hash_worker, _work_generator()
         ):
+            _check_verify_cancel(should_cancel)
             work_key = wk
             if kind == "modified":
                 mrow = {
@@ -1903,9 +2040,12 @@ def verify_directory_from_sidecars(
     verify_tsa: bool = False,
     strip_mount_prefix: str = "",
     regulated_verify: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """Verify directory by walking checksum and .f33 sidecar files."""
     import fnmatch
+
+    _check_verify_cancel(should_cancel)
 
     start_ts = datetime.now(timezone.utc)
     start_monotonic = start_ts.timestamp()
@@ -1929,6 +2069,7 @@ def verify_directory_from_sidecars(
         except OSError:
             pass
     for dirpath, dirnames, filenames in os.walk(walk_root, followlinks=follow_symlinks):
+        _check_verify_cancel(should_cancel)
         if follow_symlinks:
             keep: list[str] = []
             for d in dirnames:
@@ -2046,9 +2187,12 @@ def verify_directory_from_bagit(
     bag_root: str,
     strip_mount_prefix: str = "",
     default_algo: str = "sha256",
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """Verify an on-disk BagIt bag (RFC 8493 subset: complete + checksum valid)."""
     from manifest_core import BAGIT_PAYLOAD_DIRNAME
+
+    _check_verify_cancel(should_cancel)
 
     start_ts = datetime.now(timezone.utc)
     start_monotonic = start_ts.timestamp()
@@ -2066,6 +2210,7 @@ def verify_directory_from_bagit(
     payload_files: set[str] = set()
     walk_root = path_for_kernel(layout.payload_dir)
     for dirpath, _dirnames, filenames in os.walk(walk_root):
+        _check_verify_cancel(should_cancel)
         rel_dir = os.path.relpath(dirpath, walk_root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
         for name in filenames:
@@ -2109,6 +2254,7 @@ def verify_directory_from_bagit(
     files_scanned = 0
     seen_paths: set[str] = set()
     for norm_rel, algo, expected_digest in checks:
+        _check_verify_cancel(should_cancel)
         if norm_rel in seen_paths:
             continue
         seen_paths.add(norm_rel)
@@ -2162,8 +2308,10 @@ def verify_directory_from_checksum_manifest(
     root_dir: str,
     strip_mount_prefix: str = "",
     default_algo: str = "sha256",
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """Verify folder files against a standalone GNU/BSD checksum manifest at root."""
+    _check_verify_cancel(should_cancel)
     start_ts = datetime.now(timezone.utc)
     start_monotonic = start_ts.timestamp()
     root = os.path.abspath(root_dir)
@@ -2173,6 +2321,7 @@ def verify_directory_from_checksum_manifest(
     deleted: List[dict] = []
     files_scanned = 0
     for entry in entries.values():
+        _check_verify_cancel(should_cancel)
         rel = str(entry.path or "").replace("\\", "/").lstrip("/")
         full = os.path.join(base, rel.replace("/", os.sep))
         expected = str(entry.digest or "").strip().lower()
@@ -2431,6 +2580,7 @@ def execute_verification_sidecars(
     progress_event_callback: Callable[[dict], None] | None = None,
     strip_mount_prefix: str = "",
     regulated_verify: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> VerificationReport:
     """Library entry: verify directory via sidecar files (.f33, .sha256, etc.)."""
     void = progress_event_callback
@@ -2444,6 +2594,7 @@ def execute_verification_sidecars(
         verify_tsa=verify_tsa,
         strip_mount_prefix=strip_mount_prefix,
         regulated_verify=regulated_verify,
+        should_cancel=should_cancel,
     )
     return _verification_report_from_result(result)
 
@@ -2453,6 +2604,7 @@ def execute_verification_bagit(
     strip_mount_prefix: str = "",
     default_algo: str = "sha256",
     progress_event_callback: Callable[[dict], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> VerificationReport:
     """Library entry: verify on-disk BagIt bag."""
     if progress_event_callback:
@@ -2461,6 +2613,7 @@ def execute_verification_bagit(
         bag_root=bag_root,
         strip_mount_prefix=strip_mount_prefix,
         default_algo=default_algo,
+        should_cancel=should_cancel,
     )
     return _verification_report_from_result(result)
 
@@ -2471,6 +2624,7 @@ def execute_verification_checksum_manifest(
     strip_mount_prefix: str = "",
     default_algo: str = "sha256",
     progress_event_callback: Callable[[dict], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> VerificationReport:
     """Library entry: verify via standalone checksum manifest (GNU/BSD)."""
     if progress_event_callback:
@@ -2480,6 +2634,7 @@ def execute_verification_checksum_manifest(
         root_dir=root_dir,
         strip_mount_prefix=strip_mount_prefix,
         default_algo=default_algo,
+        should_cancel=should_cancel,
     )
     return _verification_report_from_result(result)
 
@@ -2503,6 +2658,7 @@ def execute_verification(
     created_paths_format: Literal["extension", "stripped_filtered"] = "extension",
     manifest_modified_include_reason: bool = False,
     lineage_broken_maps_to_severe_exit: bool = True,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> VerificationReport:
     """
     Library entry point: verify directory against manifest.
@@ -2529,6 +2685,7 @@ def execute_verification(
         created_paths_format=created_paths_format,
         manifest_modified_include_reason=manifest_modified_include_reason,
         lineage_broken_maps_to_severe_exit=lineage_broken_maps_to_severe_exit,
+        should_cancel=should_cancel,
     )
     return VerificationReport(
         modified=result["modified"],
@@ -2625,11 +2782,15 @@ def _discover_and_verify_pdf(pdf_path: str) -> dict:
     
     sig_path = os.path.join(pdf_dir, f"{pdf_name}.sig")
     pubkey_path = os.path.join(pdf_dir, f"{pdf_name}.pem")
-    
+
     if not os.path.isfile(path_for_kernel(sig_path)):
         return {'success': False, 'error': "[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF."}
     if not os.path.isfile(path_for_kernel(pubkey_path)):
-        return {'success': False, 'error': "[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF."}
+        fallback = os.path.join(pdf_dir, "public_key.pem")
+        if os.path.isfile(path_for_kernel(fallback)):
+            pubkey_path = fallback
+        else:
+            return {'success': False, 'error': "[FAILURE] Missing cryptographic signature. Ensure the .sig and .pem files reside in the same directory as the PDF."}
     
     try:
         with open(path_for_kernel(pdf_path), 'rb') as f:

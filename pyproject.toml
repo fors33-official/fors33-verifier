@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fors33-verifier"
-version = "v0.9.3"
+version = "v0.10.0"
 description = "Verify attested data segments. Standalone SHA-256 verification for data provenance."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 dependencies = ["cryptography>=41.0", "asn1crypto>=1.5,<2"]
-authors = [{name = "FORS33"}]
+authors = [{name = "Fors33"}]
 keywords = ["verification", "sha256", "data-provenance", "attestation"]
 classifiers = [
     "Development Status :: 4 - Beta",

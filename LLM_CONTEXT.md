@@ -30,7 +30,7 @@ Use `fors33-verifier --file path/to/file.csv --expected-hash <64-char_sha256_hex
 
 Structured JSON includes **`lineage`**, **`files_scanned`**, and **`lineage_broken_maps_to_severe_exit`**. Optional **`legacy_manifest_json`**, **`--legacy-manifest-json`**, or **`FORS33_VERIFIER_LEGACY_MANIFEST_JSON=1`** restore pre-0.9.0 JSON and exit behavior. See [docs/lineage-json-convention-public.md](docs/lineage-json-convention-public.md).
 
-Workers: positive `--workers` overrides non-positive `FORS33_WORKERS`; otherwise `default_dpk_worker_count()` with optional `FORS33_DPK_MAX_WORKERS`. `F33_KEY_REGISTRY_PATH` when non-empty must point to a readable operator registry file.
+Workers: positive `--workers` overrides non-positive `FORS33_WORKERS`; otherwise `default_dpk_worker_count()` with optional `FORS33_DPK_MAX_WORKERS`. `F33_KEY_REGISTRY_PATH` when non-empty must point to a readable operator registry file. Optional TSA pin: `F33_TSA_TRUST_BUNDLE` / `F33_TSA_TRUST_ANCHORS` when using `regulated_verify=True`.
 
 ## Keywords
 
@@ -41,4 +41,4 @@ SHA-256, data integrity, provenance, immutable, audit trail, segment verificatio
 - PyPI: https://pypi.org/project/fors33-verifier/
 - Products: https://fors33.com/products
 - Legal: https://fors33.com/legal
-- Docker: `docker run --rm docker.io/fors33/fors33-verifier:v0.9.3 --help`
+- Docker: `docker run --rm docker.io/fors33/fors33-verifier:v0.10.0 --help`

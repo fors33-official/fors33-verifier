@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag with leading v (example: v0.9.3). Bare X.Y.Z is rejected.'
+        description: 'Version tag with leading v (example: v0.10.0). Bare X.Y.Z is rejected.'
         required: true
         type: string
       push_latest:

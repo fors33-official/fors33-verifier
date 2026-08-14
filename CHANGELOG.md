@@ -2,6 +2,21 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [v0.10.0] - 2026-08-14
+
+### Added
+
+- **`regulated_verify`**: library kwarg is no longer a no-op. When true, RFC 3161 verification requires predicate `nonce_hex` and a TSA signer chain to operator PEMs from `F33_TSA_TRUST_BUNDLE` (directory) and/or `F33_TSA_TRUST_ANCHORS` (comma-separated PEM paths). Unconfigured anchors fail closed (`TSA_TRUST_ANCHORS_UNCONFIGURED`). No production EUTL PEMs in this tree; L3dgr remains the image-pinned policy host.
+- **Cooperative cancel**: optional `should_cancel=` on directory verify and execute wrappers; raises `VerifyCancelled`.
+- **PDF discovery**: `_discover_and_verify_pdf` falls back to `public_key.pem` after `{stem}.pem` miss (dict return unchanged).
+
+### Changed
+
+- **`requirements-release.txt`**: **`cryptography==50.0.0`** (hash-locked wheels) to clear Docker Scout HIGH findings on 46.0.7.
+- **RFC 3161 token order** matches L3dgr: `predicate.rfc3161_token_b64`, then `predicate.tsa.rfc3161_token_b64`, then `predicate.tsa.response_token`.
+- **PKIStatus**: `_pki_status_granted` accepts asn1crypto native `granted` and integer `0` (Sectigo). `grantedWithMods` is still rejected unless both trees change together.
+- **PyPI authors**: `Fors33`.
+
 ## [v0.9.3] - 2026-07-02
 
 ### Added

@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-v0.9.3-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-v0.10.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-v0.9.3%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-v0.10.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -13,6 +13,12 @@ Standalone verification for attested data segments and general-purpose file inte
 
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
+
+### v0.10.0 (2026-08-14)
+
+- **`regulated_verify`**: operator TSA PEMs via `F33_TSA_TRUST_BUNDLE` / `F33_TSA_TRUST_ANCHORS`; fail closed if unset. Same kernel as L3dgr; unconfigured `--verify-tsa` is not regulated L3dgr.
+- **RFC 3161**: token order matches L3dgr; PKIStatus accepts native `granted` and integer `0`.
+- **Cooperative cancel** (`should_cancel=` / `VerifyCancelled`) and PDF `public_key.pem` fallback.
 
 ### v0.9.3 (2026-07-02)
 
@@ -138,14 +144,14 @@ Inspects the folder for `fors33-manifest*.json`, BagIt layout, standalone checks
 | `manifest-sha256.txt` / `SHA256SUMS` (non-BagIt) | `checksum_manifest` |
 | `.f33` or checksum sidecars with sibling targets | `sidecars` |
 
-For sealed upload bundles exported from a Fors33 workbench, copy the storage prefix locally (manifest, data files, and matching `.f33` sidecars) then run `--mode auto` or pick the explicit mode above. Set `F33_KEY_REGISTRY_PATH` when verifying operator-registry-gated signatures. Use `--verify-tsa` for RFC 3161 timestamp blocks in JSON `.f33` sidecars (OSS path does not enforce regulated EUTL trust anchors).
+For sealed upload bundles exported from a Fors33 workbench, copy the storage prefix locally (manifest, data files, and matching `.f33` sidecars) then run `--mode auto` or pick the explicit mode above. Set `F33_KEY_REGISTRY_PATH` when verifying operator-registry-gated signatures. Independent verify uses the same kernel as L3dgr. Pin TSA trust with operator `F33_TSA_TRUST_BUNDLE` / `F33_TSA_TRUST_ANCHORS`, or use the L3dgr workbench for image-pinned anchors. Unconfigured `--verify-tsa` is not regulated L3dgr.
 
 Optional TSA verification for JSON `.f33` sidecars:
 ```bash
 fors33-verifier --mode manifest --verify-tsa --file ./manifest.json --root ./root --format json
 ```
 
-With `--verify-tsa`, the verifier accepts **`predicate.tsa.response_token`** (new enhanced format) or **`predicate.tsa.rfc3161_token_b64`** (legacy format) or top-level **`predicate.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, **message imprint** (hash OID from the token) over the same **canonical attestation bytes** as the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent), **TSA signer EKU** (`id-kp-timeStamping`), and optional **TSTInfo nonce** vs predicate **`nonce_hex`** when present. MD5/SHA-1 imprint algorithms are rejected.
+With `--verify-tsa`, the verifier prefers **`predicate.rfc3161_token_b64`**, then **`predicate.tsa.rfc3161_token_b64`**, then **`predicate.tsa.response_token`**, and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted (`granted` or integer `0`), CMS signature on the timestamp token, **message imprint** (hash OID from the token) over the same **canonical attestation bytes** as the main Ed25519 signature (V1/V2 line-oriented payload, or legacy JSON when `canonical_payload_version` is absent), **TSA signer EKU** (`id-kp-timeStamping`), and optional **TSTInfo nonce** vs predicate **`nonce_hex`** when present. MD5/SHA-1 imprint algorithms are rejected. For `regulated_verify=True`, also pin trust with operator PEMs (`F33_TSA_TRUST_BUNDLE` / `F33_TSA_TRUST_ANCHORS`).
 
 **Receipt verification (standalone dataset verification):**
 ```bash
@@ -211,7 +217,7 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **Fors33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.9.3`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.10.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
@@ -235,9 +241,9 @@ The Fors33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructu
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.9.3 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.10.0 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:v0.9.3 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:v0.10.0 --file /data/file.csv --expected-hash <sha256>
 ```
 
 Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.
