@@ -3,9 +3,11 @@
 # Otherwise pass args through to fors33-verifier (e.g. docker run image --url ... --expected-hash ...).
 set -e
 
-if [ -n "$INPUT_URL" ] || [ -n "$INPUT_FILE" ]; then
-    # GitHub Action mode: build args from env
+if [ -n "$INPUT_URL" ] || [ -n "$INPUT_FILE" ] || [ -n "$INPUT_MODE" ] || [ -n "$INPUT_ROOT" ] || [ -n "$INPUT_RECORD" ]; then
+    # GitHub Action mode: build args from env. File/URL hash mode stays the default when mode/root unset.
     set --
+    [ -n "$INPUT_MODE" ]         && set -- "$@" --mode "$INPUT_MODE"
+    [ -n "$INPUT_ROOT" ]         && set -- "$@" --root "$INPUT_ROOT"
     [ -n "$INPUT_URL" ]          && set -- "$@" --url "$INPUT_URL"
     [ -n "$INPUT_FILE" ]         && set -- "$@" --file "$INPUT_FILE"
     [ -n "$INPUT_EXPECTED_HASH" ] && set -- "$@" --expected-hash "$INPUT_EXPECTED_HASH"

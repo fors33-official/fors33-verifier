@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-v0.10.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-v0.10.1-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-v0.10.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-v0.10.1%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -13,6 +13,11 @@ Standalone verification for attested data segments and general-purpose file inte
 
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
+
+### v0.10.1 (2026-08-21)
+
+- **GitHub Action:** `mode` and `root` inputs map to CLI `--mode` / `--root`. File+hash stays the default. `expected-hash` is omitted for directory modes. Image pin `ghcr.io/fors33-official/fors33-verifier:v0.10.1`.
+- **Brand:** operator-visible banners say Fors33 Verifier (not Data Provenance Kit).
 
 ### v0.10.0 (2026-08-14)
 
@@ -215,13 +220,13 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 ## GitHub Action (CI/CD)
 
-Use **Fors33 Data Provenance Check** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
+Use **Fors33 Verifier** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.10.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.10.1`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
-  uses: fors33-official/fors33-verifier@v1  # or your tag
+  uses: fors33-official/fors33-verifier@v0.10.1
   with:
     file: ./dist/artifact.bin
     expected-hash: 'abc123...'
@@ -230,20 +235,34 @@ The **`action.yml`** default `image:` tag is a **quickstart** only. For producti
 For URL verification (presigned URLs only; no file uploads):
 
 ```yaml
-- uses: fors33-official/fors33-verifier@v1
+- uses: fors33-official/fors33-verifier@v0.10.1
   with:
     url: 'https://example.com/presigned.csv'
     expected-hash: 'abc123...'
 ```
 
-The Fors33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructure. Procure licensing at [fors33.com](https://fors33.com) or [GitHub Marketplace](https://github.com/marketplace).
+Directory or sidecar tree (same CLI as `fors33-verifier --mode auto --root .`). Fails the job on drift. Requires the v0.10.1 image (entrypoint maps `mode` / `root`):
+
+```yaml
+- uses: fors33-official/fors33-verifier@v0.10.1
+  with:
+    mode: auto
+    root: .
+```
+
+L3dgr is the licensed workbench for Seal and seats. Independent scan and verify do not require Docker Desktop. See [fors33.com/l3dgr](https://fors33.com/l3dgr#l3dgr-quickstart).
 
 ## Docker
 
+Published images:
+
+- Hub: `docker.io/fors33/fors33-verifier`
+- GHCR (Action image pin): `ghcr.io/fors33-official/fors33-verifier`
+
 ```bash
-docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.10.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.10.1 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:v0.10.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:v0.10.1 --file /data/file.csv --expected-hash <sha256>
 ```
 
 Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.
@@ -258,4 +277,4 @@ Python 3.9–3.12. `cryptography` and `asn1crypto` (required). Optional `blake3`
 
 ## License
 
-MIT License. See [LICENSE](LICENSE). Legal and regulatory boundaries: [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md) and [fors33.com/legal](https://fors33.com/legal).
+MIT License. Copyright (c) 2026 Fors33, Inc. See [LICENSE](LICENSE). Legal and regulatory boundaries: [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md) and [fors33.com/legal](https://fors33.com/legal).

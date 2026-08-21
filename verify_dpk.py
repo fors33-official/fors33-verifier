@@ -2,7 +2,7 @@
 """
 Verify attested data segment.
 
-Standalone script for Data Provenance Kit. Supports:
+Standalone script for Fors33 Verifier. Supports:
 - Remote: download from presigned URL (supports HTTP Range for segments)
 - Local: hash entire file or specific byte ranges
 - Record: verify using FORS33 attestation record JSON
@@ -65,7 +65,7 @@ try:
 except ImportError:
     urllib = None
 
-_CTA = "[TOOLCHAIN] : FORS33 Data Provenance Kit"
+_CTA = "[TOOLCHAIN] : Fors33 Verifier"
 _ERR_INVALID_SEAL_FORMAT = "[ ERR_INVALID_SEAL_FORMAT ]"
 _ERR_MISSING_SEAL = "[ ERR_MISSING_SEAL ]"
 _ERR_MANIFEST_COMPROMISED = "[ ERR_MANIFEST_COMPROMISED: Root of trust invalid ]"
@@ -82,7 +82,7 @@ EXIT_USAGE = 2
 EXIT_SEVERE = 3
 
 _COMPLIANCE_NOTICE_LINES = (
-    "[NOTICE]  Fors33 Data Provenance Kit verifier",
+    "[NOTICE]  Fors33 Verifier",
     "[NOTICE]  Output describes integrity checks only; it is not legal advice.",
     "[NOTICE]  Full legal terms: https://fors33.com/legal",
     "[NOTICE]  Validate results in your own compliance and audit workflow.",
@@ -2999,7 +2999,7 @@ def _verify_batch_directory(directory: str, args) -> int:
 def main() -> int:
     _print_compliance_notice()
     parser = argparse.ArgumentParser(
-        description="Verify attested data segment (Data Provenance Kit)"
+        description="Verify attested data (Fors33 Verifier)"
     )
     parser.add_argument(
         "--mode",

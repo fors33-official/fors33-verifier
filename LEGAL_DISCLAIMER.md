@@ -8,7 +8,7 @@ Full legal terms: [fors33.com/legal](https://fors33.com/legal)
 
 The Software is provided "AS IS", without warranty of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, and non-infringement.
 
-In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from, out of, or in connection with the Software or the use of the Software.
+In no event shall Fors33, Inc., the authors, or copyright holders be liable for any claim, damages, or other liability arising from, out of, or in connection with the Software or the use of the Software.
 
 ## Not Regulatory Advice
 

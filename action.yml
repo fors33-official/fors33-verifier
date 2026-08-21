@@ -1,7 +1,7 @@
-# FORS33 Data Provenance Check — verify data integrity in CI/CD.
-# Fails the job (exit 1) on hash mismatch. Zero-trust; no file uploads to this action.
-name: 'FORS33 Data Provenance Check'
-description: 'Verify file or URL segment against a SHA-256 hash. Fails the job on mismatch.'
+# Fors33 Verifier — verify data integrity in CI/CD.
+# Fails the job (exit 1) on hash mismatch or tree drift. Zero-trust; no file uploads to this action.
+name: 'Fors33 Verifier'
+description: 'Verify a file or URL against SHA-256, or a directory tree with --mode auto/sidecars. Fails the job on mismatch or drift.'
 branding:
   icon: shield-check
   color: blue
@@ -13,8 +13,8 @@ inputs:
     description: 'Path to local file (in runner) to verify'
     required: false
   expected-hash:
-    description: 'Expected SHA-256 hex digest'
-    required: true
+    description: 'Expected SHA-256 hex digest. Required for file/URL hash mode. Omit when using mode + root.'
+    required: false
   record:
     description: 'Path to attestation record JSON (overrides start/end/hash when provided)'
     required: false
@@ -24,7 +24,13 @@ inputs:
   end:
     description: 'End byte offset for segment verification'
     required: false
-# Exit code: 0 = verified, 1 = mismatch (fails job), 2 = error. No outputs from container.
+  mode:
+    description: 'CLI --mode: single (default), auto, sidecars, manifest, bagit, checksum_manifest'
+    required: false
+  root:
+    description: 'CLI --root directory for auto/sidecars/manifest/bagit/checksum_manifest'
+    required: false
+# Exit code: 0 = verified, 1 = mismatch or drift (fails job), 2 = error. No outputs from container.
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/fors33/fors33-verifier:v0.10.0'
+  image: 'docker://ghcr.io/fors33-official/fors33-verifier:v0.10.1'

@@ -2,6 +2,18 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [v0.10.1] - 2026-08-21
+
+### Added
+
+- **GitHub Action** inputs `mode` and `root` (CLI `--mode` / `--root`). File+hash workflows stay the default. `expected-hash` is not required when verifying a directory tree.
+- **`entrypoint.sh`** maps `INPUT_MODE` / `INPUT_ROOT` so directory jobs do not fall through to `--help`.
+
+### Changed
+
+- Action image pin: `ghcr.io/fors33-official/fors33-verifier:v0.10.1` (matches publish workflow GHCR org).
+- Operator-visible CLI banners and argparse description: **Fors33 Verifier**.
+
 ## [v0.10.0] - 2026-08-14
 
 ### Added
