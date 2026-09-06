@@ -286,19 +286,27 @@ def infer_algo_from_digest(hex_str: str) -> Optional[str]:
     return None
 
 
-def hash_file(
+def hash_file_algos(
     path: str,
-    algo: str = "sha256",
+    algos: Iterable[str],
     start: int = 0,
     end: Optional[int] = None,
     chunk_size: int = 4194304,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-) -> str:
-    """Hash a file (or byte range) using streaming chunks.
-    If progress_callback is set, it is called with (bytes_read, total_bytes) per chunk.
-    total_bytes is -1 when unknown.
-    """
-    hasher = _get_hasher(algo)
+) -> dict[str, str]:
+    """Hash a file once, updating every requested algorithm on the same bytes."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in algos:
+        name = str(raw or "").strip().lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    if not ordered:
+        raise ValueError("hash_file_algos requires at least one algorithm")
+    hashers = {name: _get_hasher(name) for name in ordered}
+
     total_bytes = -1
     remaining: Optional[int] = None
     if end is not None:
@@ -328,14 +336,19 @@ def hash_file(
     )
     bytes_read = 0
     buffer = bytearray(chunk_size)
+
+    def _update(view: memoryview | mmap.mmap | bytes) -> None:
+        for hasher in hashers.values():
+            hasher.update(view)
+
     with open(path_for_kernel(path), "rb") as f:
         if can_try_mmap:
             try:
                 with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                    hasher.update(mm)
+                    _update(mm)
                     if progress_callback:
                         progress_callback(total_bytes, total_bytes)
-                return hasher.hexdigest()
+                return {name: hashers[name].hexdigest() for name in ordered}
             except Exception:
                 # Fall through to chunked reading.
                 pass
@@ -347,7 +360,7 @@ def hash_file(
                 n = f.readinto(memoryview(buffer)[:to_read])
                 if n <= 0:
                     break
-                hasher.update(memoryview(buffer)[:n])
+                _update(memoryview(buffer)[:n])
                 remaining -= n
                 bytes_read += n
                 if progress_callback:
@@ -358,11 +371,34 @@ def hash_file(
                 n = f.readinto(buffer)
                 if n <= 0:
                     break
-                hasher.update(memoryview(buffer)[:n])
+                _update(memoryview(buffer)[:n])
                 bytes_read += n
                 if progress_callback:
                     progress_callback(bytes_read, total_bytes if total_bytes >= 0 else -1)
-    return hasher.hexdigest()
+    return {name: hashers[name].hexdigest() for name in ordered}
+
+
+def hash_file(
+    path: str,
+    algo: str = "sha256",
+    start: int = 0,
+    end: Optional[int] = None,
+    chunk_size: int = 4194304,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> str:
+    """Hash a file (or byte range) using streaming chunks.
+    If progress_callback is set, it is called with (bytes_read, total_bytes) per chunk.
+    total_bytes is -1 when unknown.
+    """
+    name = str(algo or "sha256").strip().lower() or "sha256"
+    return hash_file_algos(
+        path,
+        (name,),
+        start=start,
+        end=end,
+        chunk_size=chunk_size,
+        progress_callback=progress_callback,
+    )[name]
 
 
 def hash_stream(

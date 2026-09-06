@@ -41,4 +41,4 @@ SHA-256, data integrity, provenance, immutable, audit trail, segment verificatio
 - PyPI: https://pypi.org/project/fors33-verifier/
 - Products: https://fors33.com/products
 - Legal: https://fors33.com/legal
-- Docker: `docker run --rm docker.io/fors33/fors33-verifier:v0.10.0 --help`
+- Docker: `docker run --rm docker.io/fors33/fors33-verifier:v0.11.0 --help`

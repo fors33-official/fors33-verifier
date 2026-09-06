@@ -29,6 +29,7 @@ try:  # Support both package and flat-module imports
     from .hash_core import (  # type: ignore[import]
         default_dpk_worker_count,
         hash_file,
+        hash_file_algos,
         hash_stream,
         infer_algo_from_digest,
         is_epoch_upload_companion_basename,
@@ -46,6 +47,7 @@ except ImportError:  # pragma: no cover - flat layout
     from hash_core import (  # type: ignore[import]
         default_dpk_worker_count,
         hash_file,
+        hash_file_algos,
         hash_stream,
         infer_algo_from_digest,
         is_epoch_upload_companion_basename,
@@ -696,6 +698,8 @@ class VerificationReport:
     files_scanned: int = 0
     lineage: dict | None = None
     lineage_broken_maps_to_severe_exit: bool = True
+    series_sha256: Dict[str, str] | None = None
+    series_reference: Dict[str, str] | None = None
 
 
 def _strip_mount_prefix(path: str, prefix: str) -> str:
@@ -1567,6 +1571,65 @@ def hash_file_range(file_path: str, byte_start: int = 0, byte_end: int | None = 
     return hash_file(file_path, algo="sha256", start=byte_start, end=byte_end)
 
 
+def _series_reference_from_manifest(
+    manifest: Dict[str, ManifestEntry],
+    series_sha256: Dict[str, str],
+    modified: List[dict],
+) -> Dict[str, str]:
+    """SHA-256 reference: sealed sha256 digests; unchanged sha512 members use live SHA-256."""
+    drifted: set[str] = set()
+    for row in modified or []:
+        if not isinstance(row, dict):
+            continue
+        p = str(row.get("path") or "").replace("\\", "/")
+        if p:
+            drifted.add(p)
+    out: Dict[str, str] = {}
+    live_sha = {
+        str(k).replace("\\", "/"): str(v).strip().lower()
+        for k, v in (series_sha256 or {}).items()
+        if str(k or "").strip() and str(v or "").strip()
+    }
+    for entry in (manifest or {}).values():
+        path = str(getattr(entry, "path", "") or "").replace("\\", "/")
+        if not path:
+            continue
+        algo = str(getattr(entry, "algo", "") or "sha256").strip().lower() or "sha256"
+        digest = str(getattr(entry, "digest", "") or "").strip().lower()
+        if algo == "sha256" and digest:
+            out[path] = digest
+            continue
+        live = live_sha.get(path, "")
+        if live and path not in drifted:
+            out[path] = live
+    return out
+
+
+def _hash_pair_for_series(
+    path: str,
+    algo: str,
+    *,
+    start: int = 0,
+    end: int | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[str, str]:
+    """One read: (algo digest, sha256 digest)."""
+    algo_l = str(algo or "sha256").strip().lower() or "sha256"
+    kwargs: dict = {}
+    if start:
+        kwargs["start"] = start
+    if end is not None:
+        kwargs["end"] = end
+    if progress_callback is not None:
+        kwargs["progress_callback"] = progress_callback
+    if algo_l == "sha256":
+        digest = hash_file(path, algo="sha256", **kwargs)
+        lower = str(digest).lower()
+        return lower, lower
+    digests = hash_file_algos(path, [algo_l, "sha256"], **kwargs)
+    return str(digests[algo_l]).lower(), str(digests["sha256"]).lower()
+
+
 def download_and_hash(
     url: str,
     byte_start: int | None = None,
@@ -1760,6 +1823,8 @@ def verify_directory_from_manifest(
         print("\r\033[K", end="", file=sys.stderr)
 
     _abort_event = threading.Event()
+    series_sha256: Dict[str, str] = {}
+    series_lock = threading.Lock()
 
     def _hash_worker(item: tuple[str, str, str, str, str]):
         work_key, rel, path, algo, expected = item
@@ -1850,13 +1915,16 @@ def verify_directory_from_manifest(
 
                 progress_cb = _progress
 
+            sidecar_algo = str(parsed.get("digest_algo") or algo or "sha256").strip().lower() or "sha256"
             computed = hash_file(
                 kpath,
-                algo=parsed["digest_algo"],
-                start=parsed["range_start"],
-                end=parsed["range_end"],
+                algo=sidecar_algo,
+                start=int(parsed["range_start"]),
+                end=int(parsed["range_end"]),
                 progress_callback=progress_cb,
             )
+            # Series live SHA-256 is the full file, not the attested range.
+            digest_sha256 = hash_file(kpath, algo="sha256").lower()
             if progress_cb and sys.stderr.isatty():
                 print(file=sys.stderr)
             st_after = os.stat(kpath)
@@ -1887,6 +1955,10 @@ def verify_directory_from_manifest(
                 "inode_or_mtime_changed_during_hash",
                 None,
             )
+
+        if digest_sha256:
+            with series_lock:
+                series_sha256[rel.replace("\\", "/")] = digest_sha256
 
         computed_l = computed.lower()
         sidecar_digest_l = str(parsed["file_digest"]).lower()
@@ -1931,6 +2003,9 @@ def verify_directory_from_manifest(
                     "algo": algo,
                     "status": status or "modified",
                 }
+                rel_key = rel.replace("\\", "/")
+                if rel_key in series_sha256:
+                    mrow["digest_sha256"] = series_sha256[rel_key]
                 if mod_inc_reason:
                     st = status or "modified"
                     mrow["reason"] = err if err is not None else st
@@ -2028,6 +2103,10 @@ def verify_directory_from_manifest(
         "files_scanned": len(live_paths),
         "lineage": lineage_summary,
         "lineage_broken_maps_to_severe_exit": lineage_severe,
+        "series_sha256": dict(series_sha256),
+        "series_reference": _series_reference_from_manifest(
+            manifest, series_sha256, modified
+        ),
     }
     return result
 
@@ -2059,6 +2138,8 @@ def verify_directory_from_sidecars(
     verified: List[dict] = []
     failed: List[dict] = []
     skipped: List[dict] = []
+    series_sha256: Dict[str, str] = {}
+    series_reference: Dict[str, str] = {}
 
     walk_root = path_for_kernel(root)
     visited_dirs: set[tuple[int, int]] = set()
@@ -2098,6 +2179,33 @@ def verify_directory_from_sidecars(
             full_path = os.path.join(dirpath, name)
             lower = name.lower()
             if lower.endswith(".f33"):
+                target_name = name[:-4]
+                target_rel = (
+                    os.path.join(rel_dir, target_name) if rel_dir else target_name
+                ).replace("\\", "/")
+                target_full = os.path.join(dirpath, target_name)
+                try:
+                    parsed = _parse_f33(full_path)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    algo_f33 = str(parsed.get("digest_algo") or "sha256").strip().lower() or "sha256"
+                    expected_digest = str(parsed.get("file_digest") or "").strip().lower()
+                    if algo_f33 == "sha256" and expected_digest:
+                        series_reference[target_rel] = expected_digest
+                ktarget = path_for_kernel(target_full)
+                hash_path = ktarget if os.path.isfile(ktarget) else target_full
+                if os.path.isfile(hash_path):
+                    try:
+                        _computed, digest_sha256 = _hash_pair_for_series(hash_path, "sha256")
+                    except PermissionError:
+                        skipped.append({"path": target_rel, "error": "access_denied"})
+                        continue
+                    except OSError as e:
+                        skipped.append({"path": target_rel, "error": str(e)})
+                        continue
+                    if digest_sha256:
+                        series_sha256[target_rel] = digest_sha256
                 try:
                     ok, msg = verify_sidecar_f33(
                         full_path, verify_tsa=verify_tsa, regulated_verify=regulated_verify
@@ -2132,10 +2240,17 @@ def verify_directory_from_sidecars(
                         skipped.append({"path": norm_rel, "error": str(e)})
                         break
                     try:
-                        computed = hash_file(target_full, algo=algo)
+                        computed, digest_sha256 = _hash_pair_for_series(target_full, algo)
                     except Exception as e:
                         skipped.append({"path": target_rel, "error": str(e)})
                         break
+                    target_key = target_rel.replace("\\", "/")
+                    if digest_sha256:
+                        series_sha256[target_key] = digest_sha256
+                    if algo == "sha256":
+                        series_reference[target_key] = expected.lower()
+                    elif computed.lower() == expected.lower() and digest_sha256:
+                        series_reference[target_key] = digest_sha256
                     if computed.lower() == expected.lower():
                         verified.append({"path": target_rel, "type": ext.lstrip(".")})
                     else:
@@ -2180,6 +2295,8 @@ def verify_directory_from_sidecars(
             "duration_seconds": max(0.0, end_monotonic - start_monotonic),
         },
         "lineage": None,
+        "series_sha256": series_sha256,
+        "series_reference": series_reference,
     }
 
 
@@ -2568,6 +2685,8 @@ def _verification_report_from_result(result: dict) -> VerificationReport:
         timing=result["timing"],
         files_scanned=int(result.get("files_scanned", 0)),
         lineage=result.get("lineage"),
+        series_sha256=result.get("series_sha256") if isinstance(result.get("series_sha256"), dict) else None,
+        series_reference=result.get("series_reference") if isinstance(result.get("series_reference"), dict) else None,
     )
 
 
@@ -2703,6 +2822,8 @@ def execute_verification(
         lineage_broken_maps_to_severe_exit=bool(
             result.get("lineage_broken_maps_to_severe_exit", True)
         ),
+        series_sha256=result.get("series_sha256") if isinstance(result.get("series_sha256"), dict) else None,
+        series_reference=result.get("series_reference") if isinstance(result.get("series_reference"), dict) else None,
     )
 
 

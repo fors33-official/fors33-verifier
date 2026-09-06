@@ -2,6 +2,13 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [v0.11.0] - 2026-09-06
+
+### Added
+
+- **`hash_file_algos`**: one disk pass updates every requested hasher; public `hash_file` remains a single-algo wrapper with the same signature.
+- **`VerificationReport.series_sha256` / `series_reference`**: optional maps on library reports. Sealed SHA-256 digests are the reference; unchanged SHA-512 members may fill live SHA-256; failed SHA-512 members are omitted. `.f33` live SHA-256 is the full file, not the attested range. OSS `execute_verification` kwargs (`legacy_manifest_json` and related) are unchanged. CLI JSON does not emit the maps.
+
 ## [v0.10.1] - 2026-08-21
 
 ### Added
