@@ -1,18 +1,23 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-v0.11.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-v0.12.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-v0.11.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-v0.12.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
 Standalone verification for attested data segments and general-purpose file integrity baselines. Confirm that a data segment or directory tree matches published hashes. For structured package context, see [LLM_CONTEXT.md](LLM_CONTEXT.md).
 
-> **Legal:** Fors33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md) and [full legal terms at fors33.com/legal](https://fors33.com/legal).
+> **Legal:** Fors33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md) and [full legal terms at fors33.com/legal](https://fors33.com/legal). Report security issues privately: [SECURITY.md](SECURITY.md).
 
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
+
+### v0.12.0 (2026-09-28)
+
+- **`--verify-tsa`**: `predicate.tsa_independent` requires a second RFC 3161 token on the same canonical payload. Absent that field, verify stays single-token.
+- **BagIt**: tag manifests are checked; unlisted `.f33` / `fors33-manifest.json` / epoch companions do not fail completeness.
 
 ### v0.11.0 (2026-09-06)
 
@@ -227,11 +232,11 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **Fors33 Verifier** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.11.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.12.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
-  uses: fors33-official/fors33-verifier@v0.11.0
+  uses: fors33-official/fors33-verifier@v0.12.0
   with:
     file: ./dist/artifact.bin
     expected-hash: 'abc123...'
@@ -240,16 +245,16 @@ The **`action.yml`** default `image:` tag is a **quickstart** only. For producti
 For URL verification (presigned URLs only; no file uploads):
 
 ```yaml
-- uses: fors33-official/fors33-verifier@v0.11.0
+- uses: fors33-official/fors33-verifier@v0.12.0
   with:
     url: 'https://example.com/presigned.csv'
     expected-hash: 'abc123...'
 ```
 
-Directory or sidecar tree (same CLI as `fors33-verifier --mode auto --root .`). Fails the job on drift. Requires the v0.11.0 image (entrypoint maps `mode` / `root`):
+Directory or sidecar tree (same CLI as `fors33-verifier --mode auto --root .`). Fails the job on drift. Requires the v0.12.0 image (entrypoint maps `mode` / `root`):
 
 ```yaml
-- uses: fors33-official/fors33-verifier@v0.11.0
+- uses: fors33-official/fors33-verifier@v0.12.0
   with:
     mode: auto
     root: .
@@ -265,9 +270,9 @@ Published images:
 - GHCR (Action image pin): `ghcr.io/fors33-official/fors33-verifier`
 
 ```bash
-docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.11.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.12.0 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:v0.11.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:v0.12.0 --file /data/file.csv --expected-hash <sha256>
 ```
 
 Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.

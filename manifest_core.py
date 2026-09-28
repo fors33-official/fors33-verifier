@@ -352,6 +352,7 @@ def manifest_chain_tip_from_path(manifest_path: str) -> str | None:
 
 BAGIT_PAYLOAD_DIRNAME = "data"
 _BAGIT_MANIFEST_NAME_RE = re.compile(r"^manifest-([a-z0-9]+)\.txt$", re.IGNORECASE)
+_BAGIT_TAGMANIFEST_NAME_RE = re.compile(r"^tagmanifest-([a-z0-9]+)\.txt$", re.IGNORECASE)
 _BAGIT_SUPPORTED_VERSIONS = frozenset({"0.97", "1.0"})
 BAGIT_TAG_BASENAMES = frozenset(
     {
@@ -369,6 +370,7 @@ class BagItLayout:
     bagit_txt_path: str
     bagit_version: str
     payload_manifests: List[tuple[str, str]]
+    tag_manifests: List[tuple[str, str]]
     has_fetch_txt: bool
 
 
@@ -414,14 +416,19 @@ def discover_bagit_layout(root_dir: str) -> BagItLayout | None:
     if version not in _BAGIT_SUPPORTED_VERSIONS:
         return None
     manifests: List[tuple[str, str]] = []
+    tag_manifests: List[tuple[str, str]] = []
     try:
         for name in sorted(os.listdir(root)):
             algo = _bagit_manifest_algo_from_name(name)
-            if not algo:
-                continue
             full = os.path.join(root, name)
-            if os.path.isfile(full):
+            if algo and os.path.isfile(full):
                 manifests.append((os.path.abspath(full), algo))
+                continue
+            tm = _BAGIT_TAGMANIFEST_NAME_RE.match(name)
+            if tm and os.path.isfile(full):
+                tag_algo = tm.group(1).lower()
+                if tag_algo in ("md5", "sha1", "sha256", "sha512"):
+                    tag_manifests.append((os.path.abspath(full), tag_algo))
     except OSError:
         return None
     if not manifests:
@@ -433,6 +440,7 @@ def discover_bagit_layout(root_dir: str) -> BagItLayout | None:
         bagit_txt_path=os.path.abspath(bagit_txt),
         bagit_version=version,
         payload_manifests=manifests,
+        tag_manifests=tag_manifests,
         has_fetch_txt=os.path.isfile(fetch_path),
     )
 

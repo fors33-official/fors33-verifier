@@ -906,16 +906,31 @@ def _parse_f33(sidecar_path: str) -> dict:
     # TSA token: match L3dgr order (top-level rfc3161, nested rfc3161, then response_token).
     rfc3161_raw = predicate.get("rfc3161_token_b64")
     rfc3161_b64 = rfc3161_raw.strip() if isinstance(rfc3161_raw, str) and rfc3161_raw.strip() else None
-    if not rfc3161_b64:
-        tsa_obj = predicate.get("tsa")
-        if isinstance(tsa_obj, dict):
-            nested = tsa_obj.get("rfc3161_token_b64")
-            if isinstance(nested, str) and nested.strip():
-                rfc3161_b64 = nested.strip()
-            else:
-                response_token = tsa_obj.get("response_token")
-                if isinstance(response_token, str) and response_token.strip():
-                    rfc3161_b64 = response_token.strip()
+    tsa_obj = predicate.get("tsa") if isinstance(predicate.get("tsa"), dict) else None
+    tsa_independent_obj = (
+        predicate.get("tsa_independent") if isinstance(predicate.get("tsa_independent"), dict) else None
+    )
+    rfc3161_independent_b64: str | None = None
+    nonce_hex_independent: str | None = None
+    if not rfc3161_b64 and tsa_obj:
+        nested = tsa_obj.get("rfc3161_token_b64")
+        if isinstance(nested, str) and nested.strip():
+            rfc3161_b64 = nested.strip()
+        else:
+            response_token = tsa_obj.get("response_token")
+            if isinstance(response_token, str) and response_token.strip():
+                rfc3161_b64 = response_token.strip()
+    if tsa_independent_obj:
+        ind_nested = tsa_independent_obj.get("rfc3161_token_b64")
+        if isinstance(ind_nested, str) and ind_nested.strip():
+            rfc3161_independent_b64 = ind_nested.strip()
+        else:
+            ind_response = tsa_independent_obj.get("response_token")
+            if isinstance(ind_response, str) and ind_response.strip():
+                rfc3161_independent_b64 = ind_response.strip()
+        ind_nonce = tsa_independent_obj.get("nonce_hex")
+        if isinstance(ind_nonce, str) and ind_nonce.strip():
+            nonce_hex_independent = ind_nonce.strip()
 
     if digest_algo == "sha512":
         if len(file_hash_l) != 128 or any(c not in "0123456789abcdef" for c in file_hash_l):
@@ -955,10 +970,13 @@ def _parse_f33(sidecar_path: str) -> dict:
         "reason_for_change": _pred_opt_str(predicate, "reason_for_change"),
         "sig_alg": _pred_opt_str(predicate, "sig_alg"),
         "nonce_hex": _pred_opt_str(predicate, "nonce_hex"),
+        "nonce_hex_independent": nonce_hex_independent,
         "tsa_public_key_hex": tsa_public_key_hex_l,
         "tsa_signature_hex": tsa_signature_hex_l,
         "rfc3161_token_b64": rfc3161_b64,
-        "tsa": predicate.get("tsa") if isinstance(predicate.get("tsa"), dict) else None,
+        "rfc3161_independent_token_b64": rfc3161_independent_b64,
+        "tsa": tsa_obj,
+        "tsa_independent": tsa_independent_obj,
         "time_source": time_source,
     }
 
@@ -1426,8 +1444,14 @@ def _verify_tsa(
     *,
     regulated_verify: bool = False,
 ) -> tuple[bool, str]:
-    """Verify TSA when --verify-tsa: RFC 3161 token or legacy Ed25519 predicate.tsa; fail-closed if neither."""
+    """Verify TSA when --verify-tsa: RFC 3161 token or legacy Ed25519 predicate.tsa; fail-closed if neither.
+
+    When ``predicate.tsa_independent`` is present, both tokens must verify against
+    the same canonical payload. A sidecar without that field stays single-token.
+    """
     rfc = parsed.get("rfc3161_token_b64")
+    primary_ok = False
+    primary_msg = ""
     if isinstance(rfc, str) and rfc.strip():
         nonce_hex = parsed.get("nonce_hex")
         nonce_s = str(nonce_hex).strip() if isinstance(nonce_hex, str) and nonce_hex else ""
@@ -1440,23 +1464,45 @@ def _verify_tsa(
                 expected_nonce_hex=nonce_s or None,
                 regulated_verify=regulated_verify,
             )
-            return True, "tsa_rfc3161_verified"
+            primary_ok, primary_msg = True, "tsa_rfc3161_verified"
         except Exception as e:
             return False, f"{_ERR_TSA_INVALID} {e}"
+    else:
+        tsa = parsed.get("tsa")
+        if isinstance(tsa, dict):
+            payload = tsa.get("payload")
+            public_key_hex = str(tsa.get("public_key_hex", "")).lower()
+            signature_hex = str(tsa.get("signature_hex", "")).lower()
+            if payload is not None and len(public_key_hex) == 64 and len(signature_hex) == 128:
+                try:
+                    _verify_ed25519_f33(public_key_hex, signature_hex, str(payload).encode("utf-8"))
+                    primary_ok, primary_msg = True, "tsa_legacy_ed25519_verified"
+                except Exception as e:
+                    return False, f"{_ERR_TSA_INVALID} {e}"
 
-    tsa = parsed.get("tsa")
-    if isinstance(tsa, dict):
-        payload = tsa.get("payload")
-        public_key_hex = str(tsa.get("public_key_hex", "")).lower()
-        signature_hex = str(tsa.get("signature_hex", "")).lower()
-        if payload is not None and len(public_key_hex) == 64 and len(signature_hex) == 128:
-            try:
-                _verify_ed25519_f33(public_key_hex, signature_hex, str(payload).encode("utf-8"))
-                return True, "tsa_legacy_ed25519_verified"
-            except Exception as e:
-                return False, f"{_ERR_TSA_INVALID} {e}"
+    if not primary_ok:
+        return False, f"{_ERR_TSA_INVALID} --verify-tsa requires predicate.tsa.rfc3161_token_b64 or legacy Ed25519 tsa fields"
 
-    return False, f"{_ERR_TSA_INVALID} --verify-tsa requires predicate.tsa.rfc3161_token_b64 or legacy Ed25519 tsa fields"
+    independent = parsed.get("tsa_independent")
+    if not isinstance(independent, dict):
+        return primary_ok, primary_msg
+    ind_token = parsed.get("rfc3161_independent_token_b64")
+    if not isinstance(ind_token, str) or not ind_token.strip():
+        return False, f"{_ERR_TSA_INVALID} predicate.tsa_independent is present but has no RFC 3161 token"
+    ind_nonce = parsed.get("nonce_hex_independent")
+    ind_nonce_s = str(ind_nonce).strip() if isinstance(ind_nonce, str) and ind_nonce else ""
+    if regulated_verify and not ind_nonce_s:
+        return False, "TSA_NONCE_REQUIRED: regulated verification requires nonce_hex in predicate"
+    try:
+        _verify_rfc3161_token_b64(
+            ind_token.strip(),
+            canonical_payload_bytes,
+            expected_nonce_hex=ind_nonce_s or None,
+            regulated_verify=regulated_verify,
+        )
+    except Exception as e:
+        return False, f"{_ERR_TSA_INVALID} {e}"
+    return True, "tsa_rfc3161_dual_verified"
 
 
 def _verify_manifest_ed25519_signature(
@@ -2324,16 +2370,28 @@ def verify_directory_from_bagit(
             "Verify a complete on-disk bundle."
         )
 
-    payload_files: set[str] = set()
-    walk_root = path_for_kernel(layout.payload_dir)
-    for dirpath, _dirnames, filenames in os.walk(walk_root):
+    tag_manifests = getattr(layout, "tag_manifests", None) or []
+    for tm_path, algo in tag_manifests:
         _check_verify_cancel(should_cancel)
-        rel_dir = os.path.relpath(dirpath, walk_root)
-        rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
-        for name in filenames:
-            rel_payload = f"{rel_dir}/{name}" if rel_dir else name
-            norm = f"{BAGIT_PAYLOAD_DIRNAME}/{rel_payload}".replace("\\", "/")
-            payload_files.add(norm)
+        entries, _roots = load_manifest(tm_path, fallback_root_dir=layout.bag_root)
+        for entry in entries.values():
+            rel = str(entry.path or "").replace("\\", "/").lstrip("/")
+            base = os.path.basename(rel)
+            if base.lower().startswith("tagmanifest-") and base.lower().endswith(".txt"):
+                continue
+            abs_tag = os.path.join(layout.bag_root, rel.replace("/", os.sep))
+            if not os.path.isfile(path_for_kernel(abs_tag)):
+                raise ValueError(
+                    "ERR_VERIFY_BAG_INVALID: Tag manifest lists a missing file."
+                )
+            expected_digest = str(entry.digest or "").strip().lower()
+            if not expected_digest:
+                continue
+            computed = hash_file(abs_tag, algo=algo)
+            if computed.lower() != expected_digest:
+                raise ValueError(
+                    "ERR_VERIFY_BAG_INVALID: Tag manifest checksum mismatch."
+                )
 
     manifest_sets: list[set[str]] = []
     checks: list[tuple[str, str, str]] = []
@@ -2360,6 +2418,25 @@ def verify_directory_from_bagit(
             raise ValueError(
                 "ERR_VERIFY_BAG_INCOMPLETE: Bundle checksum manifests list different payload files."
             )
+
+    payload_files: set[str] = set()
+    walk_root = path_for_kernel(layout.payload_dir)
+    for dirpath, _dirnames, filenames in os.walk(walk_root):
+        _check_verify_cancel(should_cancel)
+        rel_dir = os.path.relpath(dirpath, walk_root)
+        rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
+        for name in filenames:
+            rel_payload = f"{rel_dir}/{name}" if rel_dir else name
+            norm = f"{BAGIT_PAYLOAD_DIRNAME}/{rel_payload}".replace("\\", "/")
+            companion = (
+                name.endswith(".f33")
+                or name == "fors33-manifest.json"
+                or is_epoch_upload_companion_basename(name)
+            )
+            if companion and norm not in expected:
+                continue
+            payload_files.add(norm)
+
     if expected != payload_files:
         raise ValueError(
             "ERR_VERIFY_BAG_INCOMPLETE: Bundle file listing does not match payload on disk."
@@ -2370,6 +2447,8 @@ def verify_directory_from_bagit(
     deleted: List[dict] = []
     files_scanned = 0
     seen_paths: set[str] = set()
+    series_sha256: Dict[str, str] = {}
+    series_reference: Dict[str, str] = {}
     for norm_rel, algo, expected_digest in checks:
         _check_verify_cancel(should_cancel)
         if norm_rel in seen_paths:
@@ -2381,11 +2460,15 @@ def verify_directory_from_bagit(
             deleted.append({"path": norm_rel, "status": "deleted"})
             continue
         try:
-            computed = hash_file(full, algo=algo or default_algo)
+            computed, digest_sha256 = _hash_pair_for_series(full, algo or default_algo)
         except OSError as e:
             modified.append({"path": norm_rel, "status": "modified", "reason": str(e)})
             continue
         files_scanned += 1
+        if digest_sha256:
+            series_sha256[norm_rel] = digest_sha256
+        if str(algo or default_algo).lower() == "sha256":
+            series_reference[norm_rel] = expected_digest
         if computed.lower() != expected_digest:
             modified.append(
                 {
@@ -2393,6 +2476,7 @@ def verify_directory_from_bagit(
                     "status": "modified",
                     "expected": expected_digest,
                     "computed": computed.lower(),
+                    "digest_sha256": digest_sha256,
                 }
             )
 
@@ -2417,6 +2501,8 @@ def verify_directory_from_bagit(
             "duration_seconds": max(0.0, end_monotonic - start_monotonic),
         },
         "lineage": None,
+        "series_sha256": series_sha256,
+        "series_reference": series_reference,
     }
 
 
