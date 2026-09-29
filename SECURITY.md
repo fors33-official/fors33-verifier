@@ -8,7 +8,7 @@ Include steps to reproduce, affected versions, and any mitigation you already ha
 
 ## Supported versions
 
-Security fixes are applied to the latest published `vX.Y.Z` release on PyPI and the matching Git tag.
+Security fixes are applied to the latest published `X.Y.Z` release on PyPI and the matching Git tag `vX.Y.Z`.
 
 Older minor lines do not receive backports unless a fix is cut as a new patch tag.
 

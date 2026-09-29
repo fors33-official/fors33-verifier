@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Git tag and pyproject version with leading v (example: v0.12.0). Bare X.Y.Z is rejected.'
+        description: 'Git tag with leading v (example: v0.12.0). pyproject.toml is the same number without v. Bare X.Y.Z is rejected.'
         required: true
         type: string
 
@@ -54,13 +54,23 @@ jobs:
           import sys
           import tomllib
 
+          def bare(value: str) -> str:
+              text = value.strip()
+              if text[:1] in ("v", "V"):
+                  return text[1:]
+              return text
+
           want = os.environ["WANT_VERSION"]
           with open("pyproject.toml", "rb") as handle:
               got = tomllib.load(handle)["project"]["version"]
-          if got != want:
-              print(f"pyproject.toml version {got!r} != {want!r}", file=sys.stderr)
+          if bare(got) != bare(want):
+              print(
+                  f"pyproject.toml version {got!r} does not match git tag {want!r} "
+                  f"(package version is X.Y.Z; tag is vX.Y.Z)",
+                  file=sys.stderr,
+              )
               sys.exit(1)
-          print(f"version ok: {got}")
+          print(f"version ok: pyproject={got} tag={want}")
           PY
 
       - name: Build

@@ -2,12 +2,16 @@
 
 All notable changes to fors33-verifier are documented here.
 
-## [v0.12.0] - 2026-09-28
+## [0.12.0] - 2026-09-28
 
 ### Added
 
 - **`--verify-tsa` dual RFC 3161**: when `predicate.tsa_independent` is present, both tokens must verify against the same canonical payload. Sidecars without that field stay single-token. CLI JSON schema is unchanged.
 - **BagIt tag manifests**: `verify_directory_from_bagit` checks `tagmanifest-*.txt` (fail closed on missing file or checksum mismatch). Unlisted `.f33`, `fors33-manifest.json`, and epoch companion files do not mark the bag incomplete. Library reports may include `series_sha256` / `series_reference`; CLI JSON still omits those maps.
+
+### Changed
+
+- **`pyproject.toml` version** is PEP 440 bare `X.Y.Z` (`0.12.0`). Git tags, `workflow_dispatch` `version`, Docker image tags, and GitHub Action pins stay `vX.Y.Z`.
 
 ## [v0.11.0] - 2026-09-06
 
