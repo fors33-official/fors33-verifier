@@ -121,10 +121,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          cp "${{ steps.attest.outputs.bundle-path }}" sbom/attestation-provenance.json
+          cp "${{ steps.attest-sbom.outputs.bundle-path }}" sbom/attestation-sbom.json
           gh release create "${{ steps.meta.outputs.version }}" \
             dist/*.whl dist/*.tar.gz \
             sbom/fors33-verifier.cdx.json \
-            "${{ steps.attest.outputs.bundle-path }}" \
-            "${{ steps.attest-sbom.outputs.bundle-path }}" \
+            sbom/attestation-provenance.json \
+            sbom/attestation-sbom.json \
             --title "${{ steps.meta.outputs.version }}" \
             --notes "See CHANGELOG.md for this tag."
