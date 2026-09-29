@@ -17,7 +17,8 @@ jobs:
       url: https://pypi.org/p/fors33-verifier
     permissions:
       id-token: write
-      contents: read
+      contents: write
+      attestations: write
     steps:
       - name: Set version
         id: meta
@@ -68,5 +69,23 @@ jobs:
           python -m pip install "build==1.6.1"
           python -m build
 
+      - name: Attest
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.meta.outputs.version }}" \
+            dist/*.whl dist/*.tar.gz \
+            "${{ steps.attest.outputs.bundle-path }}" \
+            --title "${{ steps.meta.outputs.version }}" \
+            --notes "See CHANGELOG.md for this tag."
