@@ -12,6 +12,7 @@ All notable changes to fors33-verifier are documented here.
 ### Changed
 
 - **`pyproject.toml` version** is PEP 440 bare `X.Y.Z` (`0.12.0`). Git tags, `workflow_dispatch` `version`, Docker image tags, and GitHub Action pins stay `vX.Y.Z`.
+- **`publish-pypi` GitHub Release** attaches a CycloneDX JSON SBOM of the wheel (`sbom/fors33-verifier.cdx.json`, outside `dist/`) plus provenance and SBOM attestations.
 
 ## [v0.11.0] - 2026-09-06
 

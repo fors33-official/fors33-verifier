@@ -68,7 +68,7 @@ Standalone verification for attested data segments and general-purpose file inte
 - **Manifest HMAC**: `verify_manifest_hmac()` in `verify_dpk` validates an optional `fors33-manifest.hmac` sidecar when a pepper is supplied; missing sidecar is legacy-OK (`absent`).
 - **TSA**: RFC 3161 path enforces TSA signer **id-kp-timeStamping** EKU; optional **nonce** check when `nonce_hex` is present in the predicate (`TSA_EKU_MISSING`, `TSA_NONCE_MISMATCH`).
 - **Receipts**: `receipt_core` adds `generate_verification_receipt`, `receipt_to_json`, `receipt_to_base64`; `verify_receipt` loads `fors33-manifest.json` via `manifest_core.load_manifest(..., dataset_path)` like the extension.
-- **Supply chain**: Docker images built by `publish-fors33-verifier` attach **SBOM** and **SLSA provenance** (`build-push-action` `sbom: true`, `provenance: mode=max`). Pin by digest in regulated CI.
+- **Supply chain**: Docker images built by `publish-fors33-verifier` attach **SBOM** and **SLSA provenance** (`build-push-action` `sbom: true`, `provenance: mode=max`). Pin by digest in regulated CI. The `publish-pypi` GitHub Release also attaches a CycloneDX JSON SBOM of the wheel.
 
 ### 0.8.0 (2026-05-01)
 

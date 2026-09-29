@@ -79,6 +79,33 @@ jobs:
           python -m pip install "build==1.6.1"
           python -m build
 
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          syft-version: v1.51.1
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one wheel in dist/; found ${#wheels[@]}."
+            exit 1
+          fi
+          syft scan "${wheels[0]}" -o cyclonedx-json=sbom/fors33-verifier.cdx.json
+          test -s sbom/fors33-verifier.cdx.json
+
+      - name: Attest SBOM
+        id: attest-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+          sbom-path: sbom/fors33-verifier.cdx.json
+
       - name: Attest
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -96,6 +123,8 @@ jobs:
         run: |
           gh release create "${{ steps.meta.outputs.version }}" \
             dist/*.whl dist/*.tar.gz \
+            sbom/fors33-verifier.cdx.json \
             "${{ steps.attest.outputs.bundle-path }}" \
+            "${{ steps.attest-sbom.outputs.bundle-path }}" \
             --title "${{ steps.meta.outputs.version }}" \
             --notes "See CHANGELOG.md for this tag."
