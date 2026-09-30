@@ -2,6 +2,14 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.12.1] - 2026-09-29
+
+### Changed
+
+- **PATCH** package version `0.12.1` so `publish-pypi` checks out a tag that includes unique GitHub Release attest filenames (`sbom/attestation-provenance.json` and `sbom/attestation-sbom.json`). Tag `v0.12.0` does not have those copies.
+- **GitHub Actions**: all jobs run on `ubuntu-24.04`; JavaScript actions are SHA-pinned to Node 24 releases; every checkout uses `persist-credentials: false`.
+- **`pyproject.toml` version** is PEP 440 bare `X.Y.Z` (`0.12.1`). Git tags, `workflow_dispatch` `version`, Docker image tags, and GitHub Action pins stay `vX.Y.Z`.
+
 ## [0.12.0] - 2026-09-28
 
 ### Added

@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-v0.12.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-v0.12.1-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-v0.12.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-v0.12.1%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -13,6 +13,11 @@ Standalone verification for attested data segments and general-purpose file inte
 
 <details>
 <summary><strong>Release notes &amp; version history</strong></summary>
+
+### v0.12.1 (2026-09-29)
+
+- **PATCH** so PyPI GitHub Release can attach uniquely named attest bundles (`attestation-provenance.json` and `attestation-sbom.json`) from the tagged tree.
+- **GitHub Actions**: `ubuntu-24.04` and Node 24 SHA-pinned actions.
 
 ### v0.12.0 (2026-09-28)
 
@@ -90,7 +95,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-PyPI publish is **manual** via GitHub Actions workflow **`publish-pypi`** (`workflow_dispatch` with **`version`** = `vX.Y.Z`). The git tag `vX.Y.Z` must already exist on origin; the job checks out that tag and requires `pyproject.toml` `[project].version` to be the same number **without** the `v` prefix (PEP 440). Bare dispatch input `X.Y.Z` is **rejected**. It does **not** run automatically on git tags. The GitHub Actions workflow **`publish-fors33-verifier`** is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with **`version`** = `vX.Y.Z` (e.g. `v0.12.0`) and **`push_latest`** — bare `X.Y.Z` is **rejected**. It does **not** run automatically on git tags.
+PyPI publish is **manual** via GitHub Actions workflow **`publish-pypi`** (`workflow_dispatch` with **`version`** = `vX.Y.Z`). The git tag `vX.Y.Z` must already exist on origin; the job checks out that tag and requires `pyproject.toml` `[project].version` to be the same number **without** the `v` prefix (PEP 440). Bare dispatch input `X.Y.Z` is **rejected**. It does **not** run automatically on git tags. The GitHub Actions workflow **`publish-fors33-verifier`** is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with **`version`** = `vX.Y.Z` (e.g. `v0.12.1`) and **`push_latest`** — bare `X.Y.Z` is **rejected**. It does **not** run automatically on git tags.
 
 ## Usage
 
@@ -232,11 +237,11 @@ Manifest/sidecars modes support `--format json` with `--warn-only` to report dri
 
 Use **Fors33 Verifier** in your workflow. The step fails (exit 1) on hash mismatch, blocking the pipeline.
 
-The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.12.0`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
+The **`action.yml`** default `image:` tag is a **quickstart** only. For production or regulated CI, **pin** a **semver image tag** (for example `:v0.12.1`) or an **immutable digest**—do **not** rely on `:latest` as your compliance baseline.
 
 ```yaml
 - name: Verify data integrity
-  uses: fors33-official/fors33-verifier@v0.12.0
+  uses: fors33-official/fors33-verifier@v0.12.1
   with:
     file: ./dist/artifact.bin
     expected-hash: 'abc123...'
@@ -245,16 +250,16 @@ The **`action.yml`** default `image:` tag is a **quickstart** only. For producti
 For URL verification (presigned URLs only; no file uploads):
 
 ```yaml
-- uses: fors33-official/fors33-verifier@v0.12.0
+- uses: fors33-official/fors33-verifier@v0.12.1
   with:
     url: 'https://example.com/presigned.csv'
     expected-hash: 'abc123...'
 ```
 
-Directory or sidecar tree (same CLI as `fors33-verifier --mode auto --root .`). Fails the job on drift. Requires the v0.12.0 image (entrypoint maps `mode` / `root`):
+Directory or sidecar tree (same CLI as `fors33-verifier --mode auto --root .`). Fails the job on drift. Requires the v0.12.1 image (entrypoint maps `mode` / `root`):
 
 ```yaml
-- uses: fors33-official/fors33-verifier@v0.12.0
+- uses: fors33-official/fors33-verifier@v0.12.1
   with:
     mode: auto
     root: .
@@ -270,9 +275,9 @@ Published images:
 - GHCR (Action image pin): `ghcr.io/fors33-official/fors33-verifier`
 
 ```bash
-docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.12.0 --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33-official/fors33-verifier:v0.12.1 --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/fors33-verifier:v0.12.0 --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:v0.12.1 --file /data/file.csv --expected-hash <sha256>
 ```
 
 Published images include **SBOM** and **build provenance** metadata (expand **Release notes & version history** near the top of this README). `:latest` is convenient for exploration; pin a **version tag** or **immutable digest** in production pipelines so runs stay reproducible.
